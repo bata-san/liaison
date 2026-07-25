@@ -14,7 +14,12 @@ pub struct Request {
 
 impl Request {
     pub fn new(request_id: u64, token: impl Into<String>, command: Command) -> Self {
-        Self { protocol_version: PROTOCOL_VERSION, request_id, token: token.into(), command }
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            token: token.into(),
+            command,
+        }
     }
 }
 
@@ -23,12 +28,30 @@ impl Request {
 pub enum Command {
     Health,
     Snapshot,
-    SetMode { mode: OperatingMode },
-    StartSlot { slot_id: String },
-    StopSlot { slot_id: String },
-    ResizeSlot { slot_id: String, allocation: ResourceAllocation },
-    Rebalance { active_workspace_slots: u8 },
-    ReserveGpu { slot_id: String, access: GpuAccess },
+    SetMode {
+        mode: OperatingMode,
+    },
+    StartSlot {
+        slot_id: String,
+    },
+    StopSlot {
+        slot_id: String,
+    },
+    ResizeSlot {
+        slot_id: String,
+        allocation: ResourceAllocation,
+    },
+    AssignWorker {
+        slot_id: String,
+        allocation: ResourceAllocation,
+    },
+    Rebalance {
+        active_workspace_slots: u8,
+    },
+    ReserveGpu {
+        slot_id: String,
+        access: GpuAccess,
+    },
     ReleaseGpu,
 }
 
@@ -43,16 +66,29 @@ pub struct Response {
 
 impl Response {
     pub fn success(request_id: u64, data: ResponseData) -> Self {
-        Self { protocol_version: PROTOCOL_VERSION, request_id, ok: true, data: Some(data), error: None }
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            ok: true,
+            data: Some(data),
+            error: None,
+        }
     }
 
-    pub fn failure(request_id: u64, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn failure(
+        request_id: u64,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
             request_id,
             ok: false,
             data: None,
-            error: Some(ApiError { code: code.into(), message: message.into() }),
+            error: Some(ApiError {
+                code: code.into(),
+                message: message.into(),
+            }),
         }
     }
 }
@@ -84,7 +120,18 @@ mod tests {
 
     #[test]
     fn request_round_trip_is_stable() {
-        let request = Request::new(7, "0123456789abcdef", Command::Rebalance { active_workspace_slots: 3 });
+        let request = Request::new(
+            7,
+            "0123456789abcdef",
+            Command::AssignWorker {
+                slot_id: "W1".to_owned(),
+                allocation: ResourceAllocation {
+                    cpu_threads: 12,
+                    memory_mib: 8_192,
+                    gpu: GpuAccess::Shared,
+                },
+            },
+        );
         let json = serde_json::to_string(&request).unwrap();
         let decoded: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, request);
