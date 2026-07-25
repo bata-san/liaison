@@ -64,11 +64,23 @@ impl ServiceApp {
                 self.stop_slot(&slot_id)?;
                 Ok(ResponseData::Snapshot(self.snapshot()?))
             }
-            Command::ResizeSlot { slot_id, allocation } => {
+            Command::ResizeSlot {
+                slot_id,
+                allocation,
+            } => {
                 self.resize_slot(&slot_id, allocation)?;
                 Ok(ResponseData::Snapshot(self.snapshot()?))
             }
-            Command::Rebalance { active_workspace_slots } => {
+            Command::AssignWorker {
+                slot_id,
+                allocation,
+            } => {
+                self.assign_worker(&slot_id, allocation)?;
+                Ok(ResponseData::Snapshot(self.snapshot()?))
+            }
+            Command::Rebalance {
+                active_workspace_slots,
+            } => {
                 self.rebalance(active_workspace_slots)?;
                 Ok(ResponseData::Snapshot(self.snapshot()?))
             }
@@ -88,18 +100,32 @@ impl ServiceApp {
         let runtime_gpu = self.runtime.collect_gpu_metrics();
         let tailscale_online = self.runtime.tailscale_online();
         if let Ok(mut snapshot) = self.snapshot.lock() {
-            let logical_owner = snapshot.gpu.reserved_by.clone();
+            let exclusive_owner = snapshot
+                .slots
+                .iter()
+                .find(|slot| {
+                    slot.status != SlotStatus::Stopped
+                        && slot.allocation.gpu == GpuAccess::Exclusive
+                })
+                .map(|slot| slot.id.clone());
+
             snapshot.host = host;
             snapshot.gpu = runtime_gpu;
-            if logical_owner.is_some() {
-                snapshot.gpu.reserved_by = logical_owner;
-            }
+            snapshot.gpu.reserved_by = exclusive_owner;
             snapshot.tailscale_online = tailscale_online;
             for slot in &mut snapshot.slots {
                 if matches!(slot.status, SlotStatus::Running | SlotStatus::Throttled) {
-                    let ratio = if slot.kind == SlotKind::Persistent { 0.28 } else { 0.42 };
+                    let ratio = if slot.kind == SlotKind::Persistent {
+                        0.28
+                    } else {
+                        0.42
+                    };
                     slot.memory_used_mib = (slot.allocation.memory_mib as f32 * ratio) as u32;
-                    slot.cpu_percent = if slot.status == SlotStatus::Throttled { 8.0 } else { 18.0 };
+                    slot.cpu_percent = if slot.status == SlotStatus::Throttled {
+                        8.0
+                    } else {
+                        18.0
+                    };
                 } else {
                     slot.memory_used_mib = 0;
                     slot.cpu_percent = 0.0;
@@ -119,93 +145,284 @@ impl ServiceApp {
     fn start_persistent_slots(&self) -> Result<(), AppError> {
         let allocations = balanced_persistent_allocations(self.config.persistent_pool);
         for (index, allocation) in allocations.into_iter().enumerate() {
-            self.start_specific_slot(&format!("P{}", index + 1), allocation, SlotStatus::Running)?;
+            self.start_specific_slot(
+                &format!("P{}", index + 1),
+                allocation,
+                SlotStatus::Running,
+            )?;
         }
         Ok(())
     }
 
     fn start_slot(&self, slot_id: &str) -> Result<(), AppError> {
-        let (kind, mode) = {
-            let snapshot = self.snapshot()?;
-            let slot = snapshot.slot(slot_id).ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
-            (slot.kind, snapshot.mode)
-        };
-        if mode == OperatingMode::Maintenance {
-            return Err(AppError::Rejected("slots cannot start in maintenance mode".to_owned()));
+        let snapshot = self.snapshot()?;
+        let slot = snapshot
+            .slot(slot_id)
+            .cloned()
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+        if slot.status != SlotStatus::Stopped {
+            return Ok(());
         }
-        match kind {
+        if snapshot.mode == OperatingMode::Maintenance {
+            return Err(AppError::Rejected(
+                "slots cannot start in maintenance mode".to_owned(),
+            ));
+        }
+
+        match slot.kind {
             SlotKind::Persistent => {
                 let index = persistent_index(slot_id)?;
-                let allocation = balanced_persistent_allocations(self.config.persistent_pool)[index];
+                let allocation =
+                    balanced_persistent_allocations(self.config.persistent_pool)[index];
                 self.start_specific_slot(slot_id, allocation, SlotStatus::Running)
             }
             SlotKind::Workspace => {
-                if mode == OperatingMode::LocalExclusive {
-                    return Err(AppError::Rejected("workspace slots cannot start in local-exclusive mode".to_owned()));
+                if snapshot.mode == OperatingMode::LocalExclusive {
+                    return Err(AppError::Rejected(
+                        "workspace slots cannot start in local-exclusive mode".to_owned(),
+                    ));
                 }
-                let mut active = self.active_workspace_ids()?;
-                if !active.iter().any(|id| id.eq_ignore_ascii_case(slot_id)) {
-                    active.push(slot_id.to_ascii_uppercase());
+                let capacity = self.workspace_capacity_for_mode(snapshot.mode);
+                let used_cpu: u16 = snapshot
+                    .slots
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.kind == SlotKind::Workspace
+                            && candidate.status != SlotStatus::Stopped
+                    })
+                    .map(|candidate| candidate.allocation.cpu_threads)
+                    .sum();
+                let used_memory: u32 = snapshot
+                    .slots
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.kind == SlotKind::Workspace
+                            && candidate.status != SlotStatus::Stopped
+                    })
+                    .map(|candidate| candidate.allocation.memory_mib)
+                    .sum();
+                let free_cpu = capacity.cpu_threads.saturating_sub(used_cpu);
+                let free_memory = capacity.memory_mib.saturating_sub(used_memory);
+                if free_cpu == 0 || free_memory == 0 {
+                    return Err(AppError::Rejected(
+                        "workspace pool has no free CPU or memory".to_owned(),
+                    ));
                 }
-                active.sort();
-                let capacity = self.workspace_capacity_for_mode(mode);
-                let status = if mode == OperatingMode::Class { SlotStatus::Throttled } else { SlotStatus::Running };
-                self.apply_workspace_set(active, capacity, status)
+                self.assign_worker(
+                    slot_id,
+                    ResourceAllocation {
+                        cpu_threads: free_cpu.min(4),
+                        memory_mib: free_memory.min(4_096),
+                        gpu: GpuAccess::None,
+                    },
+                )
             }
         }
     }
 
     fn stop_slot(&self, slot_id: &str) -> Result<(), AppError> {
-        let (kind, was_active) = {
-            let snapshot = self.snapshot()?;
-            let slot = snapshot.slot(slot_id).ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
-            (slot.kind, slot.status != SlotStatus::Stopped)
-        };
-        if !was_active {
+        let slot = self
+            .snapshot()?
+            .slot(slot_id)
+            .cloned()
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+        if slot.status == SlotStatus::Stopped {
             return Ok(());
         }
-        if kind == SlotKind::Workspace {
-            let mut active = self.active_workspace_ids()?;
-            active.retain(|id| !id.eq_ignore_ascii_case(slot_id));
-            let mode = self.snapshot()?.mode;
-            let capacity = self.workspace_capacity_for_mode(mode);
-            let status = if mode == OperatingMode::Class { SlotStatus::Throttled } else { SlotStatus::Running };
-            self.apply_workspace_set(active, capacity, status)
-        } else {
-            self.runtime.stop_slot(slot_id)?;
-            let mut snapshot = self.snapshot.lock().map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
-            let slot = snapshot.slot_mut(slot_id).ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
-            slot.status = SlotStatus::Stopped;
-            slot.allocation = ResourceAllocation::stopped();
-            slot.last_error = None;
-            snapshot.recalculate_pools();
-            drop(snapshot);
-            self.persist_snapshot();
-            Ok(())
-        }
+
+        self.runtime.stop_slot(slot_id)?;
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+        let target = snapshot
+            .slot_mut(slot_id)
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+        target.status = SlotStatus::Stopped;
+        target.allocation = ResourceAllocation::stopped();
+        target.endpoint = None;
+        target.last_error = None;
+        Self::sync_gpu_owner(&mut snapshot);
+        snapshot.recalculate_pools();
+        drop(snapshot);
+        self.persist_snapshot();
+        Ok(())
     }
 
-    fn resize_slot(&self, slot_id: &str, allocation: ResourceAllocation) -> Result<(), AppError> {
-        let (kind, status) = {
-            let snapshot = self.snapshot()?;
-            let slot = snapshot.slot(slot_id).ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
-            (slot.kind, slot.status)
-        };
-        if status == SlotStatus::Stopped {
-            return Err(AppError::Rejected("cannot resize a stopped slot".to_owned()));
+    fn assign_worker(
+        &self,
+        slot_id: &str,
+        allocation: ResourceAllocation,
+    ) -> Result<(), AppError> {
+        let existing = self.snapshot()?;
+        let slot = existing
+            .slot(slot_id)
+            .cloned()
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+        if slot.kind != SlotKind::Workspace {
+            return Err(AppError::Rejected(
+                "custom worker allocations are only available for workspace slots".to_owned(),
+            ));
         }
-        let capacity = match kind {
-            SlotKind::Persistent => self.config.persistent_pool,
-            SlotKind::Workspace => self.workspace_capacity_for_mode(self.snapshot()?.mode),
-        };
-        if allocation.cpu_threads > capacity.cpu_threads || allocation.memory_mib > capacity.memory_mib {
-            return Err(AppError::Rejected("requested allocation exceeds the pool capacity".to_owned()));
+        if matches!(
+            existing.mode,
+            OperatingMode::LocalExclusive | OperatingMode::Maintenance
+        ) {
+            return Err(AppError::Rejected(
+                "workspace pool is disabled in the current mode".to_owned(),
+            ));
         }
+        if allocation.gpu != GpuAccess::None && existing.mode != OperatingMode::Remote {
+            return Err(AppError::Rejected(
+                "GPU access is only available in remote mode".to_owned(),
+            ));
+        }
+
+        let capacity = self.workspace_capacity_for_mode(existing.mode);
+        self.validate_workspace_allocation(&existing, slot_id, allocation, capacity)?;
+
+        if allocation.gpu == GpuAccess::Shared {
+            let exclusive_owner = existing.slots.iter().find(|candidate| {
+                candidate.kind == SlotKind::Workspace
+                    && candidate.status != SlotStatus::Stopped
+                    && !candidate.id.eq_ignore_ascii_case(slot_id)
+                    && candidate.allocation.gpu == GpuAccess::Exclusive
+            });
+            if let Some(owner) = exclusive_owner {
+                return Err(AppError::Rejected(format!(
+                    "GPU is exclusively assigned to {}",
+                    owner.id
+                )));
+            }
+        }
+
+        let gpu_to_clear: Vec<_> = if allocation.gpu == GpuAccess::Exclusive {
+            existing
+                .slots
+                .iter()
+                .filter(|candidate| {
+                    candidate.kind == SlotKind::Workspace
+                        && candidate.status != SlotStatus::Stopped
+                        && !candidate.id.eq_ignore_ascii_case(slot_id)
+                        && candidate.allocation.gpu != GpuAccess::None
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for other in &gpu_to_clear {
+            self.runtime.set_gpu_access(other, GpuAccess::None)?;
+        }
+
+        let target_status = if existing.mode == OperatingMode::Class {
+            SlotStatus::Throttled
+        } else {
+            SlotStatus::Running
+        };
+        let mut updated = slot.clone();
+        updated.status = SlotStatus::Starting;
+        updated.allocation = allocation;
+
+        if slot.status == SlotStatus::Stopped {
+            self.runtime.start_slot(&updated)?;
+        } else if slot.allocation.gpu != allocation.gpu {
+            self.runtime.set_gpu_access(&updated, allocation.gpu)?;
+        } else {
+            self.runtime.resize_slot(slot_id, &allocation)?;
+        }
+
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+        for other in gpu_to_clear {
+            if let Some(target) = snapshot.slot_mut(&other.id) {
+                target.allocation.gpu = GpuAccess::None;
+            }
+        }
+        let target = snapshot
+            .slot_mut(slot_id)
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+        target.status = target_status;
+        target.allocation = allocation;
+        target.last_error = None;
+        target.endpoint = Some(format!("liaison://{}", slot_id.to_ascii_lowercase()));
+        Self::sync_gpu_owner(&mut snapshot);
+        snapshot.recalculate_pools();
+        drop(snapshot);
+        self.persist_snapshot();
+        Ok(())
+    }
+
+    fn resize_slot(
+        &self,
+        slot_id: &str,
+        allocation: ResourceAllocation,
+    ) -> Result<(), AppError> {
+        let existing = self.snapshot()?;
+        let slot = existing
+            .slot(slot_id)
+            .cloned()
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+        if slot.kind == SlotKind::Workspace {
+            return self.assign_worker(slot_id, allocation);
+        }
+        if slot.status == SlotStatus::Stopped {
+            return Err(AppError::Rejected(
+                "cannot resize a stopped slot".to_owned(),
+            ));
+        }
+        if allocation.gpu != GpuAccess::None {
+            return Err(AppError::Rejected(
+                "persistent slots cannot receive GPU access".to_owned(),
+            ));
+        }
+        if allocation.cpu_threads == 0 || allocation.memory_mib == 0 {
+            return Err(AppError::Rejected(
+                "CPU and memory allocations must be greater than zero".to_owned(),
+            ));
+        }
+        let other_cpu: u16 = existing
+            .slots
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == SlotKind::Persistent
+                    && candidate.status != SlotStatus::Stopped
+                    && !candidate.id.eq_ignore_ascii_case(slot_id)
+            })
+            .map(|candidate| candidate.allocation.cpu_threads)
+            .sum();
+        let other_memory: u32 = existing
+            .slots
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == SlotKind::Persistent
+                    && candidate.status != SlotStatus::Stopped
+                    && !candidate.id.eq_ignore_ascii_case(slot_id)
+            })
+            .map(|candidate| candidate.allocation.memory_mib)
+            .sum();
+        if other_cpu.saturating_add(allocation.cpu_threads)
+            > self.config.persistent_pool.cpu_threads
+            || other_memory.saturating_add(allocation.memory_mib)
+                > self.config.persistent_pool.memory_mib
+        {
+            return Err(AppError::Rejected(
+                "persistent allocation exceeds the persistent pool".to_owned(),
+            ));
+        }
+
         self.runtime.resize_slot(slot_id, &allocation)?;
-        let mut snapshot = self.snapshot.lock().map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
-        let slot = snapshot.slot_mut(slot_id).ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
-        slot.allocation = allocation;
-        slot.last_error = None;
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+        let target = snapshot
+            .slot_mut(slot_id)
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+        target.allocation = allocation;
+        target.last_error = None;
         snapshot.recalculate_pools();
         drop(snapshot);
         self.persist_snapshot();
@@ -220,29 +437,66 @@ impl ServiceApp {
             )));
         }
         let mode = self.snapshot()?.mode;
-        if matches!(mode, OperatingMode::LocalExclusive | OperatingMode::Maintenance) && active_workspace_slots > 0 {
-            return Err(AppError::Rejected("workspace pool is disabled in the current mode".to_owned()));
+        if matches!(
+            mode,
+            OperatingMode::LocalExclusive | OperatingMode::Maintenance
+        ) && active_workspace_slots > 0
+        {
+            return Err(AppError::Rejected(
+                "workspace pool is disabled in the current mode".to_owned(),
+            ));
         }
-        let active = (1..=active_workspace_slots).map(|index| format!("W{index}")).collect();
-        let status = if mode == OperatingMode::Class { SlotStatus::Throttled } else { SlotStatus::Running };
+        let active = (1..=active_workspace_slots)
+            .map(|index| format!("W{index}"))
+            .collect();
+        let status = if mode == OperatingMode::Class {
+            SlotStatus::Throttled
+        } else {
+            SlotStatus::Running
+        };
         self.apply_workspace_set(active, self.workspace_capacity_for_mode(mode), status)
     }
 
     fn set_mode(&self, mode: OperatingMode) -> Result<(), AppError> {
-        let active = self.active_workspace_ids()?;
         match mode {
-            OperatingMode::Remote => self.apply_workspace_set(active, self.config.workspace_pool, SlotStatus::Running)?,
-            OperatingMode::Class => self.apply_workspace_set(active, self.config.class_workspace_pool, SlotStatus::Throttled)?,
-            OperatingMode::LocalExclusive => self.apply_workspace_set(Vec::new(), self.config.workspace_pool, SlotStatus::Stopped)?,
+            OperatingMode::Remote => {
+                self.fit_active_workspaces_to_capacity(
+                    self.config.workspace_pool,
+                    SlotStatus::Running,
+                )?;
+            }
+            OperatingMode::Class => {
+                self.release_gpu()?;
+                self.fit_active_workspaces_to_capacity(
+                    self.config.class_workspace_pool,
+                    SlotStatus::Throttled,
+                )?;
+            }
+            OperatingMode::LocalExclusive => {
+                self.apply_workspace_set(
+                    Vec::new(),
+                    self.config.workspace_pool,
+                    SlotStatus::Stopped,
+                )?;
+            }
             OperatingMode::Maintenance => {
-                self.apply_workspace_set(Vec::new(), self.config.workspace_pool, SlotStatus::Stopped)?;
+                self.apply_workspace_set(
+                    Vec::new(),
+                    self.config.workspace_pool,
+                    SlotStatus::Stopped,
+                )?;
                 for id in ["P1", "P2"] {
                     self.stop_slot(id)?;
                 }
             }
         }
-        let mut snapshot = self.snapshot.lock().map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
         snapshot.mode = mode;
+        self.sync_workspace_pool_capacity(&mut snapshot, mode);
         snapshot.recalculate_pools();
         drop(snapshot);
         self.persist_snapshot();
@@ -251,44 +505,62 @@ impl ServiceApp {
 
     fn reserve_gpu(&self, slot_id: &str, access: GpuAccess) -> Result<(), AppError> {
         if access == GpuAccess::None {
-            return self.release_gpu();
-        }
-        if self.snapshot()?.mode != OperatingMode::Remote {
-            return Err(AppError::Rejected("GPU reservations are only allowed in remote mode".to_owned()));
-        }
-        let slot = {
-            let snapshot = self.snapshot()?;
-            snapshot.slot(slot_id).cloned().ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?
-        };
-        if slot.kind != SlotKind::Workspace || slot.status == SlotStatus::Stopped {
-            return Err(AppError::Rejected("GPU can only be reserved by an active workspace slot".to_owned()));
-        }
-        if let Some(previous) = self.snapshot()?.gpu.reserved_by {
-            if previous != slot.id {
-                let previous_slot = self.snapshot()?.slot(&previous).cloned();
-                if let Some(previous_slot) = previous_slot {
-                    let _ = self.runtime.set_gpu_access(&previous_slot, GpuAccess::None);
-                }
+            let existing = self.snapshot()?;
+            let slot = existing
+                .slot(slot_id)
+                .cloned()
+                .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+            if slot.kind != SlotKind::Workspace || slot.status == SlotStatus::Stopped {
+                return Err(AppError::Rejected(
+                    "GPU access can only be changed for an active worker".to_owned(),
+                ));
             }
+            let mut allocation = slot.allocation;
+            allocation.gpu = GpuAccess::None;
+            return self.assign_worker(slot_id, allocation);
         }
-        self.runtime.set_gpu_access(&slot, access)?;
-        let mut snapshot = self.snapshot.lock().map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
-        snapshot.set_gpu_reservation(Some(slot_id), access).map_err(|error| AppError::Rejected(error.to_string()))?;
-        snapshot.recalculate_pools();
-        drop(snapshot);
-        self.persist_snapshot();
-        Ok(())
+
+        let existing = self.snapshot()?;
+        let slot = existing
+            .slot(slot_id)
+            .cloned()
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+        if slot.kind != SlotKind::Workspace || slot.status == SlotStatus::Stopped {
+            return Err(AppError::Rejected(
+                "GPU can only be assigned to an active workspace slot".to_owned(),
+            ));
+        }
+        let mut allocation = slot.allocation;
+        allocation.gpu = access;
+        self.assign_worker(slot_id, allocation)
     }
 
     fn release_gpu(&self) -> Result<(), AppError> {
-        let owner = self.snapshot()?.gpu.reserved_by;
-        if let Some(owner) = owner {
-            if let Some(slot) = self.snapshot()?.slot(&owner).cloned() {
-                self.runtime.set_gpu_access(&slot, GpuAccess::None)?;
+        let assigned: Vec<_> = self
+            .snapshot()?
+            .slots
+            .into_iter()
+            .filter(|slot| {
+                slot.kind == SlotKind::Workspace
+                    && slot.status != SlotStatus::Stopped
+                    && slot.allocation.gpu != GpuAccess::None
+            })
+            .collect();
+        for slot in &assigned {
+            self.runtime.set_gpu_access(slot, GpuAccess::None)?;
+        }
+
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+        for slot in &mut snapshot.slots {
+            if slot.kind == SlotKind::Workspace {
+                slot.allocation.gpu = GpuAccess::None;
             }
         }
-        let mut snapshot = self.snapshot.lock().map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
-        snapshot.set_gpu_reservation(None, GpuAccess::None).map_err(|error| AppError::Rejected(error.to_string()))?;
+        snapshot.gpu.reserved_by = None;
+        snapshot.recalculate_pools();
         drop(snapshot);
         self.persist_snapshot();
         Ok(())
@@ -300,33 +572,29 @@ impl ServiceApp {
         allocation: ResourceAllocation,
         status: SlotStatus,
     ) -> Result<(), AppError> {
-        let mut slot = {
-            let snapshot = self.snapshot()?;
-            snapshot.slot(slot_id).cloned().ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?
-        };
+        let mut slot = self
+            .snapshot()?
+            .slot(slot_id)
+            .cloned()
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
         slot.status = SlotStatus::Starting;
         slot.allocation = allocation;
         self.runtime.start_slot(&slot)?;
-        let mut snapshot = self.snapshot.lock().map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
-        let target = snapshot.slot_mut(slot_id).ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+        let target = snapshot
+            .slot_mut(slot_id)
+            .ok_or_else(|| AppError::UnknownSlot(slot_id.to_owned()))?;
         target.status = status;
-        target.allocation = slot.allocation;
+        target.allocation = allocation;
         target.last_error = None;
         target.endpoint = Some(format!("liaison://{}", slot_id.to_ascii_lowercase()));
         snapshot.recalculate_pools();
         drop(snapshot);
         self.persist_snapshot();
         Ok(())
-    }
-
-    fn active_workspace_ids(&self) -> Result<Vec<String>, AppError> {
-        let snapshot = self.snapshot()?;
-        let mut active: Vec<_> = snapshot.slots.iter()
-            .filter(|slot| slot.kind == SlotKind::Workspace && slot.status != SlotStatus::Stopped)
-            .map(|slot| slot.id.clone())
-            .collect();
-        active.sort();
-        Ok(active)
     }
 
     fn apply_workspace_set(
@@ -338,56 +606,204 @@ impl ServiceApp {
         active_ids.sort();
         active_ids.dedup();
         if active_ids.len() > self.config.max_workspace_slots as usize {
-            return Err(AppError::Rejected("too many workspace slots requested".to_owned()));
+            return Err(AppError::Rejected(
+                "too many workspace slots requested".to_owned(),
+            ));
         }
+
         let allocations = balanced_workspace_allocations(active_ids.len(), capacity);
         let existing = self.snapshot()?;
-        for slot in existing.slots.iter().filter(|slot| slot.kind == SlotKind::Workspace) {
-            if let Some(index) = active_ids.iter().position(|id| id.eq_ignore_ascii_case(&slot.id)) {
-                let mut allocation = allocations[index].clone();
-                if existing.gpu.reserved_by.as_deref() == Some(slot.id.as_str()) {
+        for slot in existing
+            .slots
+            .iter()
+            .filter(|slot| slot.kind == SlotKind::Workspace)
+        {
+            if let Some(index) = active_ids
+                .iter()
+                .position(|id| id.eq_ignore_ascii_case(&slot.id))
+            {
+                let mut allocation = allocations[index];
+                if slot.status != SlotStatus::Stopped {
                     allocation.gpu = slot.allocation.gpu;
                 }
                 if slot.status == SlotStatus::Stopped {
                     self.start_specific_slot(&slot.id, allocation, target_status)?;
                 } else {
                     self.runtime.resize_slot(&slot.id, &allocation)?;
-                    let mut snapshot = self.snapshot.lock().map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
-                    let target = snapshot.slot_mut(&slot.id).ok_or_else(|| AppError::UnknownSlot(slot.id.clone()))?;
+                    let mut snapshot = self
+                        .snapshot
+                        .lock()
+                        .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+                    let target = snapshot
+                        .slot_mut(&slot.id)
+                        .ok_or_else(|| AppError::UnknownSlot(slot.id.clone()))?;
                     target.status = target_status;
                     target.allocation = allocation;
                     target.last_error = None;
                 }
             } else if slot.status != SlotStatus::Stopped {
                 self.runtime.stop_slot(&slot.id)?;
-                let mut snapshot = self.snapshot.lock().map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
-                let target = snapshot.slot_mut(&slot.id).ok_or_else(|| AppError::UnknownSlot(slot.id.clone()))?;
+                let mut snapshot = self
+                    .snapshot
+                    .lock()
+                    .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+                let target = snapshot
+                    .slot_mut(&slot.id)
+                    .ok_or_else(|| AppError::UnknownSlot(slot.id.clone()))?;
                 target.status = SlotStatus::Stopped;
                 target.allocation = ResourceAllocation::stopped();
                 target.endpoint = None;
                 target.last_error = None;
-                if snapshot.gpu.reserved_by.as_deref() == Some(slot.id.as_str()) {
-                    snapshot.gpu.reserved_by = None;
-                }
             }
         }
-        let mut snapshot = self.snapshot.lock().map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+        Self::sync_gpu_owner(&mut snapshot);
         snapshot.recalculate_pools();
         drop(snapshot);
         self.persist_snapshot();
         Ok(())
     }
 
+    fn fit_active_workspaces_to_capacity(
+        &self,
+        capacity: PoolCapacity,
+        target_status: SlotStatus,
+    ) -> Result<(), AppError> {
+        let existing = self.snapshot()?;
+        let active: Vec<_> = existing
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.kind == SlotKind::Workspace && slot.status != SlotStatus::Stopped
+            })
+            .cloned()
+            .collect();
+        let total_cpu: u16 = active
+            .iter()
+            .map(|slot| slot.allocation.cpu_threads)
+            .sum();
+        let total_memory: u32 = active.iter().map(|slot| slot.allocation.memory_mib).sum();
+        let needs_fit =
+            total_cpu > capacity.cpu_threads || total_memory > capacity.memory_mib;
+        let fitted = needs_fit
+            .then(|| balanced_workspace_allocations(active.len(), capacity));
+
+        for (index, slot) in active.iter().enumerate() {
+            let mut allocation = fitted
+                .as_ref()
+                .map_or(slot.allocation, |values| values[index]);
+            allocation.gpu = slot.allocation.gpu;
+            if needs_fit {
+                self.runtime.resize_slot(&slot.id, &allocation)?;
+            }
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .map_err(|_| AppError::State("snapshot lock poisoned".to_owned()))?;
+            let target = snapshot
+                .slot_mut(&slot.id)
+                .ok_or_else(|| AppError::UnknownSlot(slot.id.clone()))?;
+            target.status = target_status;
+            target.allocation = allocation;
+            target.last_error = None;
+        }
+        Ok(())
+    }
+
+    fn validate_workspace_allocation(
+        &self,
+        snapshot: &SystemSnapshot,
+        slot_id: &str,
+        allocation: ResourceAllocation,
+        capacity: PoolCapacity,
+    ) -> Result<(), AppError> {
+        if allocation.cpu_threads == 0 || allocation.memory_mib == 0 {
+            return Err(AppError::Rejected(
+                "CPU and memory allocations must be greater than zero".to_owned(),
+            ));
+        }
+        if allocation.cpu_threads > capacity.cpu_threads
+            || allocation.memory_mib > capacity.memory_mib
+        {
+            return Err(AppError::Rejected(
+                "requested allocation exceeds the workspace pool".to_owned(),
+            ));
+        }
+        let other_cpu: u16 = snapshot
+            .slots
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == SlotKind::Workspace
+                    && candidate.status != SlotStatus::Stopped
+                    && !candidate.id.eq_ignore_ascii_case(slot_id)
+            })
+            .map(|candidate| candidate.allocation.cpu_threads)
+            .sum();
+        let other_memory: u32 = snapshot
+            .slots
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == SlotKind::Workspace
+                    && candidate.status != SlotStatus::Stopped
+                    && !candidate.id.eq_ignore_ascii_case(slot_id)
+            })
+            .map(|candidate| candidate.allocation.memory_mib)
+            .sum();
+
+        let requested_cpu = other_cpu.saturating_add(allocation.cpu_threads);
+        let requested_memory = other_memory.saturating_add(allocation.memory_mib);
+        if requested_cpu > capacity.cpu_threads || requested_memory > capacity.memory_mib {
+            return Err(AppError::Rejected(format!(
+                "allocation would use {requested_cpu}/{} CPU threads and {requested_memory}/{} MiB memory",
+                capacity.cpu_threads, capacity.memory_mib
+            )));
+        }
+        Ok(())
+    }
+
     fn workspace_capacity_for_mode(&self, mode: OperatingMode) -> PoolCapacity {
         match mode {
             OperatingMode::Class => self.config.class_workspace_pool,
-            OperatingMode::Remote | OperatingMode::LocalExclusive | OperatingMode::Maintenance => self.config.workspace_pool,
+            OperatingMode::Remote
+            | OperatingMode::LocalExclusive
+            | OperatingMode::Maintenance => self.config.workspace_pool,
         }
     }
 
+    fn sync_workspace_pool_capacity(
+        &self,
+        snapshot: &mut SystemSnapshot,
+        mode: OperatingMode,
+    ) {
+        let capacity = self.workspace_capacity_for_mode(mode);
+        if let Some(pool) = snapshot.pools.iter_mut().find(|pool| pool.id == "workspace") {
+            pool.cpu_capacity_threads = capacity.cpu_threads;
+            pool.memory_capacity_mib = capacity.memory_mib;
+        }
+    }
+
+    fn sync_gpu_owner(snapshot: &mut SystemSnapshot) {
+        snapshot.gpu.reserved_by = snapshot
+            .slots
+            .iter()
+            .find(|slot| {
+                slot.status != SlotStatus::Stopped
+                    && slot.allocation.gpu == GpuAccess::Exclusive
+            })
+            .map(|slot| slot.id.clone());
+    }
+
     fn persist_snapshot(&self) {
-        let Ok(snapshot) = self.snapshot() else { return; };
-        let Ok(json) = serde_json::to_string_pretty(&snapshot) else { return; };
+        let Ok(snapshot) = self.snapshot() else {
+            return;
+        };
+        let Ok(json) = serde_json::to_string_pretty(&snapshot) else {
+            return;
+        };
         if let Err(error) = fs::write(&self.state_path, json) {
             tracing::warn!(%error, path = %self.state_path.display(), "failed to persist state snapshot");
         }
@@ -423,26 +839,124 @@ mod tests {
 
     fn app() -> ServiceApp {
         let mut config = AppConfig::default();
-        config.data_directory = std::env::temp_dir().join(format!("liaison-test-{}", liaison_core::unix_time_ms())).display().to_string();
+        config.data_directory = std::env::temp_dir()
+            .join(format!("liaison-test-{}", liaison_core::unix_time_ms()))
+            .display()
+            .to_string();
         ServiceApp::new(config, Arc::new(MockRuntime::new())).unwrap()
     }
 
     #[test]
-    fn rebalance_creates_requested_number_of_workspace_slots() {
+    fn custom_worker_allocations_are_preserved_and_capacity_checked() {
         let app = app();
-        app.rebalance(3).unwrap();
+        app.assign_worker(
+            "W1",
+            ResourceAllocation {
+                cpu_threads: 10,
+                memory_mib: 8_192,
+                gpu: GpuAccess::None,
+            },
+        )
+        .unwrap();
+        app.assign_worker(
+            "W2",
+            ResourceAllocation {
+                cpu_threads: 20,
+                memory_mib: 16_384,
+                gpu: GpuAccess::None,
+            },
+        )
+        .unwrap();
+
         let snapshot = app.snapshot().unwrap();
-        assert_eq!(snapshot.slots.iter().filter(|slot| slot.kind == SlotKind::Workspace && slot.status == SlotStatus::Running).count(), 3);
-        assert_eq!(snapshot.pools.iter().find(|pool| pool.id == "workspace").unwrap().cpu_allocated_threads, 38);
+        assert_eq!(snapshot.slot("W1").unwrap().allocation.cpu_threads, 10);
+        assert_eq!(snapshot.slot("W2").unwrap().allocation.cpu_threads, 20);
+        assert!(app
+            .assign_worker(
+                "W3",
+                ResourceAllocation {
+                    cpu_threads: 9,
+                    memory_mib: 1_024,
+                    gpu: GpuAccess::None,
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn shared_gpu_can_be_used_by_multiple_workers() {
+        let app = app();
+        for id in ["W1", "W2"] {
+            app.assign_worker(
+                id,
+                ResourceAllocation {
+                    cpu_threads: 4,
+                    memory_mib: 4_096,
+                    gpu: GpuAccess::Shared,
+                },
+            )
+            .unwrap();
+        }
+        let snapshot = app.snapshot().unwrap();
+        assert_eq!(snapshot.slot("W1").unwrap().allocation.gpu, GpuAccess::Shared);
+        assert_eq!(snapshot.slot("W2").unwrap().allocation.gpu, GpuAccess::Shared);
+        assert!(snapshot.gpu.reserved_by.is_none());
+    }
+
+    #[test]
+    fn exclusive_gpu_clears_shared_assignments() {
+        let app = app();
+        app.assign_worker(
+            "W1",
+            ResourceAllocation {
+                cpu_threads: 4,
+                memory_mib: 4_096,
+                gpu: GpuAccess::Shared,
+            },
+        )
+        .unwrap();
+        app.assign_worker(
+            "W2",
+            ResourceAllocation {
+                cpu_threads: 4,
+                memory_mib: 4_096,
+                gpu: GpuAccess::Exclusive,
+            },
+        )
+        .unwrap();
+
+        let snapshot = app.snapshot().unwrap();
+        assert_eq!(snapshot.slot("W1").unwrap().allocation.gpu, GpuAccess::None);
+        assert_eq!(
+            snapshot.slot("W2").unwrap().allocation.gpu,
+            GpuAccess::Exclusive
+        );
+        assert_eq!(snapshot.gpu.reserved_by.as_deref(), Some("W2"));
     }
 
     #[test]
     fn local_exclusive_keeps_persistent_slots_running() {
         let app = app();
-        app.rebalance(2).unwrap();
+        app.assign_worker(
+            "W1",
+            ResourceAllocation {
+                cpu_threads: 8,
+                memory_mib: 8_192,
+                gpu: GpuAccess::None,
+            },
+        )
+        .unwrap();
         app.set_mode(OperatingMode::LocalExclusive).unwrap();
         let snapshot = app.snapshot().unwrap();
-        assert!(snapshot.slots.iter().filter(|slot| slot.kind == SlotKind::Workspace).all(|slot| slot.status == SlotStatus::Stopped));
-        assert!(snapshot.slots.iter().filter(|slot| slot.kind == SlotKind::Persistent).all(|slot| slot.status == SlotStatus::Running));
+        assert!(snapshot
+            .slots
+            .iter()
+            .filter(|slot| slot.kind == SlotKind::Workspace)
+            .all(|slot| slot.status == SlotStatus::Stopped));
+        assert!(snapshot
+            .slots
+            .iter()
+            .filter(|slot| slot.kind == SlotKind::Persistent)
+            .all(|slot| slot.status == SlotStatus::Running));
     }
 }
