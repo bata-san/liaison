@@ -21,7 +21,7 @@ It keeps Windows native for classroom use while splitting a shared remote resour
 - The always-on service is Rust and uses the standard TCP stack rather than an embedded web server.
 - Runtime state is persisted as JSON; there is no database daemon.
 - The GUI uses Tauri/WebView2 rather than shipping a Chromium/Electron process tree.
-- The frontend is vanilla TypeScript and CSS with no UI framework.
+- The frontend uses React components and CSS without a heavyweight dashboard framework.
 - The GUI may be closed while the service continues to run.
 
 ## Safe demo
