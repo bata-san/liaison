@@ -142,11 +142,13 @@ function allocateWeighted(
   const order = rawExtras
     .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
     .sort((left, right) => right.fraction - left.fraction);
+
   for (const entry of order) {
     if (remainder <= 0) break;
     extraUnits[entry.index] += 1;
     remainder -= 1;
   }
+
   return Object.fromEntries(
     ids.map((id, index) => [id, (minimumUnits + extraUnits[index]) * quantum])
   );
@@ -159,6 +161,7 @@ function planFromWeights(
 ): PlannedWorker[] {
   const pool = snapshot.pools.find((candidate) => candidate.id === "workspace");
   if (!pool || workers.length === 0) return [];
+
   const ids = workers.map((worker) => worker.id);
   const cpu = allocateWeighted(pool.cpu_capacity_threads, weights, ids, MIN_WORKER_CPU);
   const memory = allocateWeighted(
@@ -168,7 +171,8 @@ function planFromWeights(
     MIN_WORKER_MEMORY_MIB,
     512
   );
-  return workers.map((worker) => ({
+
+  return workers.map((worker): PlannedWorker => ({
     id: worker.id,
     allocation: {
       cpu_threads: cpu[worker.id],
@@ -207,7 +211,9 @@ function App(): React.JSX.Element {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const run = useCallback(async (action: () => Promise<SystemSnapshot>): Promise<SystemSnapshot | null> => {
+  const run = useCallback(async (
+    action: () => Promise<SystemSnapshot>
+  ): Promise<SystemSnapshot | null> => {
     if (busyRef.current) return null;
     busyRef.current = true;
     setBusy(true);
@@ -310,7 +316,10 @@ function App(): React.JSX.Element {
     return current;
   }, [assign]);
 
-  const applyWeights = useCallback((base: SystemSnapshot, nextWeights: WeightMap): Promise<SystemSnapshot> => {
+  const applyWeights = useCallback((
+    base: SystemSnapshot,
+    nextWeights: WeightMap
+  ): Promise<SystemSnapshot> => {
     const active = base.slots
       .filter((slot) => slot.kind === "workspace" && isActive(slot))
       .sort((left, right) => left.id.localeCompare(right.id));
@@ -321,7 +330,11 @@ function App(): React.JSX.Element {
     if (!snapshot || !canAdd || busy) return;
     const next = workers.find((worker) => !isActive(worker));
     if (!next) return;
+
     const targetWeights = addWorkerWeight(normalizeWeights(weights, activeIds), activeIds, next.id);
+    const defaultGpu: GpuAccess = snapshot.mode === "remote" && snapshot.gpu.available
+      ? "shared"
+      : "none";
     setWeights(targetWeights);
 
     void run(async () => {
@@ -340,7 +353,7 @@ function App(): React.JSX.Element {
           allocation: {
             cpu_threads: MIN_WORKER_CPU,
             memory_mib: MIN_WORKER_MEMORY_MIB,
-            gpu: snapshot.mode === "remote" && snapshot.gpu.available ? "shared" : "none"
+            gpu: defaultGpu
           }
         });
       }
@@ -350,20 +363,22 @@ function App(): React.JSX.Element {
         allocation: {
           cpu_threads: MIN_WORKER_CPU,
           memory_mib: MIN_WORKER_MEMORY_MIB,
-          gpu: snapshot.mode === "remote" && snapshot.gpu.available ? "shared" : "none"
+          gpu: defaultGpu
         }
       });
 
       const nextActive = current.slots
         .filter((slot) => slot.kind === "workspace" && isActive(slot))
         .sort((left, right) => left.id.localeCompare(right.id));
-      const plan = planFromWeights(current, nextActive, targetWeights).map((worker) => ({
-        ...worker,
-        allocation: {
-          ...worker.allocation,
-          gpu: snapshot.mode === "remote" && snapshot.gpu.available ? "shared" : "none"
-        }
-      }));
+      const plan: PlannedWorker[] = planFromWeights(current, nextActive, targetWeights).map(
+        (worker): PlannedWorker => ({
+          ...worker,
+          allocation: {
+            ...worker.allocation,
+            gpu: defaultGpu
+          }
+        })
+      );
       return executePlan(current, plan);
     });
   }, [snapshot, canAdd, busy, workers, weights, activeIds, run, assign, executePlan]);
@@ -531,10 +546,7 @@ function App(): React.JSX.Element {
                     return (
                       <React.Fragment key={worker.id}>
                         {index > 0 && (
-                          <Separator
-                            className="split-separator"
-                            title="Drag to change worker weight"
-                          >
+                          <Separator className="split-separator" title="Drag to change worker weight">
                             <span aria-hidden="true"><i /><i /><i /></span>
                           </Separator>
                         )}
@@ -546,10 +558,7 @@ function App(): React.JSX.Element {
                         >
                           <article className="worker-card">
                             <header>
-                              <div>
-                                <strong>{worker.id}</strong>
-                                <span>{worker.status}</span>
-                              </div>
+                              <div><strong>{worker.id}</strong><span>{worker.status}</span></div>
                               <button
                                 type="button"
                                 className="remove-button"
@@ -596,7 +605,6 @@ function App(): React.JSX.Element {
           </div>
         </section>
 
-        {busy && <div className="apply-indicator">Applying allocation…</div>}
         {error && <div className="error-toast">{error}</div>}
       </main>
     </div>
