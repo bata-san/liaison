@@ -53,6 +53,7 @@ interface SystemSnapshot {
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Application root was not found");
+const appRoot: HTMLDivElement = app;
 
 let snapshot: SystemSnapshot | null = null;
 let busy = false;
@@ -166,7 +167,7 @@ function render(): void {
   const activeWorkspaces = workspaces.filter((slot) => slot.status !== "stopped").length;
   const updated = new Date(snapshot.updated_at_unix_ms).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
-  app.innerHTML = `<div class="app-shell">
+  appRoot.innerHTML = `<div class="app-shell">
     <aside>
       <div class="brand"><span class="logo">L</span><div><strong>Liaison</strong><small>workstation fabric</small></div></div>
       <nav>
@@ -267,7 +268,7 @@ function bindEvents(): void {
 }
 
 function renderConnectionError(message: string): void {
-  app.innerHTML = `<div class="connection-screen"><div class="connection-dialog"><span class="logo large">L</span><span class="eyebrow">SERVICE OFFLINE</span><h1>Connect to Liaison Service</h1><p>The local control service did not answer. Start the mock service for a safe demo, or install the Windows service.</p><code>${escapeHtml(message)}</code><button id="retry">Retry connection</button><small>Demo: powershell -ExecutionPolicy Bypass -File scripts/run-demo.ps1</small></div></div>`;
+  appRoot.innerHTML = `<div class="connection-screen"><div class="connection-dialog"><span class="logo large">L</span><span class="eyebrow">SERVICE OFFLINE</span><h1>Connect to Liaison Service</h1><p>The local control service did not answer. Start the mock service for a safe demo, or install the Windows service.</p><code>${escapeHtml(message)}</code><button id="retry">Retry connection</button><small>Demo: powershell -ExecutionPolicy Bypass -File scripts/run-demo.ps1</small></div></div>`;
   document.querySelector<HTMLButtonElement>("#retry")?.addEventListener("click", () => void refresh(true));
 }
 
