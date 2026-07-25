@@ -8,6 +8,30 @@ $Root = Split-Path -Parent $PSScriptRoot
 $DemoDir = Join-Path $Root "runtime-data\demo"
 $Config = Join-Path $DemoDir "liaison.demo.json"
 $Token = "liaison-demo-token-2026"
+$ServiceExe = Join-Path $Root "target\debug\liaison-service.exe"
+$CliExe = Join-Path $Root "target\debug\liaison-cli.exe"
+
+function Stop-StaleDemoService {
+    param([string]$ExpectedPath)
+
+    $expectedFullPath = [System.IO.Path]::GetFullPath($ExpectedPath)
+    $staleProcesses = Get-Process -Name "liaison-service" -ErrorAction SilentlyContinue
+    foreach ($process in $staleProcesses) {
+        $processPath = $null
+        try {
+            $processPath = $process.Path
+        } catch {
+            # A process owned by another account may not expose its path.
+        }
+
+        if ($processPath -and ([System.IO.Path]::GetFullPath($processPath) -ieq $expectedFullPath)) {
+            Write-Host "Stopping stale Liaison demo service (PID $($process.Id))..." -ForegroundColor Yellow
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Wait-Process -Id $process.Id -Timeout 5 -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $DemoDir | Out-Null
 
 $ConfigJson = @{
@@ -29,13 +53,17 @@ $ConfigJson = @{
 
 Push-Location $Root
 try {
+    # Windows locks a running .exe. A previous interrupted demo can therefore
+    # prevent Cargo from replacing target\debug\liaison-service.exe.
+    Stop-StaleDemoService -ExpectedPath $ServiceExe
+
     if (-not $NoBuild) {
         cargo build -p liaison-service -p liaison-cli
         if ($LASTEXITCODE -ne 0) { throw "Rust build failed" }
     }
 
-    $ServiceExe = Join-Path $Root "target\debug\liaison-service.exe"
     if (-not (Test-Path $ServiceExe)) { throw "Service executable not found: $ServiceExe" }
+    if (-not (Test-Path $CliExe)) { throw "CLI executable not found: $CliExe" }
 
     $Service = Start-Process -FilePath $ServiceExe -ArgumentList @("--console", "--config", $Config, "--runtime", "mock") -PassThru -WindowStyle Hidden
     try {
@@ -44,29 +72,33 @@ try {
         $Ready = $false
         for ($i = 0; $i -lt 40; $i++) {
             Start-Sleep -Milliseconds 250
-            & (Join-Path $Root "target\debug\liaison-cli.exe") health *> $null
+            & $CliExe health *> $null
             if ($LASTEXITCODE -eq 0) { $Ready = $true; break }
         }
         if (-not $Ready) { throw "Demo service did not become ready" }
 
-        & (Join-Path $Root "target\debug\liaison-cli.exe") rebalance 3 | Out-Null
+        & $CliExe rebalance 3 | Out-Null
         Write-Host "Liaison demo service is running." -ForegroundColor Green
         Write-Host "Address: $env:LIAISON_ADDRESS"
         Write-Host "Runtime: mock (safe; WSL and Docker are not touched)"
 
         if ($NoGui) {
-            & (Join-Path $Root "target\debug\liaison-cli.exe") snapshot
+            & $CliExe snapshot
         } else {
             Push-Location (Join-Path $Root "apps\liaison-desktop")
             try {
                 if (-not (Test-Path "node_modules")) { npm install }
                 npm run tauri:dev
+                if ($LASTEXITCODE -ne 0) { throw "Tauri development host failed" }
             } finally {
                 Pop-Location
             }
         }
     } finally {
-        if ($Service -and -not $Service.HasExited) { Stop-Process -Id $Service.Id -Force }
+        if ($Service -and -not $Service.HasExited) {
+            Stop-Process -Id $Service.Id -Force -ErrorAction SilentlyContinue
+            Wait-Process -Id $Service.Id -Timeout 5 -ErrorAction SilentlyContinue
+        }
     }
 } finally {
     Pop-Location
