@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use liaison_client::LiaisonClient;
-use liaison_core::{GpuAccess, OperatingMode, SystemSnapshot};
+use liaison_core::{GpuAccess, OperatingMode, ResourceAllocation, SystemSnapshot};
 use liaison_protocol::{Command, ResponseData};
 use tauri::State;
 
@@ -11,37 +11,91 @@ struct AppState {
 
 #[tauri::command]
 fn get_snapshot(state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
-    snapshot_from(state.client.send(Command::Snapshot).map_err(|error| error.to_string())?)
+    snapshot_from(
+        state
+            .client
+            .send(Command::Snapshot)
+            .map_err(|error| error.to_string())?,
+    )
 }
 
 #[tauri::command]
 fn set_mode(mode: OperatingMode, state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
-    snapshot_from(state.client.send(Command::SetMode { mode }).map_err(|error| error.to_string())?)
+    snapshot_from(
+        state
+            .client
+            .send(Command::SetMode { mode })
+            .map_err(|error| error.to_string())?,
+    )
 }
 
 #[tauri::command]
-fn rebalance(active_workspace_slots: u8, state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
+fn rebalance(
+    active_workspace_slots: u8,
+    state: State<'_, AppState>,
+) -> Result<SystemSnapshot, String> {
     snapshot_from(
-        state.client
-            .send(Command::Rebalance { active_workspace_slots })
+        state
+            .client
+            .send(Command::Rebalance {
+                active_workspace_slots,
+            })
             .map_err(|error| error.to_string())?,
     )
 }
 
 #[tauri::command]
 fn start_slot(slot_id: String, state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
-    snapshot_from(state.client.send(Command::StartSlot { slot_id }).map_err(|error| error.to_string())?)
+    snapshot_from(
+        state
+            .client
+            .send(Command::StartSlot { slot_id })
+            .map_err(|error| error.to_string())?,
+    )
 }
 
 #[tauri::command]
 fn stop_slot(slot_id: String, state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
-    snapshot_from(state.client.send(Command::StopSlot { slot_id }).map_err(|error| error.to_string())?)
+    snapshot_from(
+        state
+            .client
+            .send(Command::StopSlot { slot_id })
+            .map_err(|error| error.to_string())?,
+    )
 }
 
 #[tauri::command]
-fn reserve_gpu(slot_id: String, access: GpuAccess, state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
+fn assign_worker(
+    slot_id: String,
+    cpu_threads: u16,
+    memory_mib: u32,
+    gpu: GpuAccess,
+    state: State<'_, AppState>,
+) -> Result<SystemSnapshot, String> {
     snapshot_from(
-        state.client
+        state
+            .client
+            .send(Command::AssignWorker {
+                slot_id,
+                allocation: ResourceAllocation {
+                    cpu_threads,
+                    memory_mib,
+                    gpu,
+                },
+            })
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+#[tauri::command]
+fn reserve_gpu(
+    slot_id: String,
+    access: GpuAccess,
+    state: State<'_, AppState>,
+) -> Result<SystemSnapshot, String> {
+    snapshot_from(
+        state
+            .client
             .send(Command::ReserveGpu { slot_id, access })
             .map_err(|error| error.to_string())?,
     )
@@ -49,7 +103,12 @@ fn reserve_gpu(slot_id: String, access: GpuAccess, state: State<'_, AppState>) -
 
 #[tauri::command]
 fn release_gpu(state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
-    snapshot_from(state.client.send(Command::ReleaseGpu).map_err(|error| error.to_string())?)
+    snapshot_from(
+        state
+            .client
+            .send(Command::ReleaseGpu)
+            .map_err(|error| error.to_string())?,
+    )
 }
 
 fn snapshot_from(data: ResponseData) -> Result<SystemSnapshot, String> {
@@ -61,13 +120,16 @@ fn snapshot_from(data: ResponseData) -> Result<SystemSnapshot, String> {
 
 fn main() {
     tauri::Builder::default()
-        .manage(AppState { client: LiaisonClient::from_environment() })
+        .manage(AppState {
+            client: LiaisonClient::from_environment(),
+        })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             set_mode,
             rebalance,
             start_slot,
             stop_slot,
+            assign_worker,
             reserve_gpu,
             release_gpu,
         ])
