@@ -1,9 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [main, "agent/**"]
   pull_request:
+  push:
+    branches: [main]
 
 jobs:
   windows-validation:
@@ -33,10 +33,12 @@ jobs:
         shell: powershell
         continue-on-error: true
         run: |
-          cargo test --workspace *> cargo-test.log
-          if ($LASTEXITCODE -ne 0) {
-            Get-Content cargo-test.log -Tail 160
-            exit 1
+          $Output = & cargo test --workspace 2>&1
+          $ExitCode = $LASTEXITCODE
+          $Output | Out-File -FilePath cargo-test.log -Encoding utf8
+          if ($ExitCode -ne 0) {
+            $Output | Select-Object -Last 160
+            exit $ExitCode
           }
 
       - name: Upload Rust diagnostics
