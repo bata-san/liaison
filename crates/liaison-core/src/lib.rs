@@ -219,15 +219,18 @@ impl SystemSnapshot {
         }
         self.gpu.reserved_by = None;
         if let Some(id) = slot_id {
-            let slot = self.slot_mut(id).ok_or_else(|| CoreError::UnknownSlot(id.to_owned()))?;
-            if slot.kind != SlotKind::Workspace {
-                return Err(CoreError::InvalidOperation("GPU can only be reserved by a workspace slot".to_owned()));
-            }
-            if slot.status == SlotStatus::Stopped {
-                return Err(CoreError::InvalidOperation("GPU cannot be reserved by a stopped slot".to_owned()));
-            }
-            slot.allocation.gpu = access;
-            self.gpu.reserved_by = Some(slot.id.clone());
+            let reserved_id = {
+                let slot = self.slot_mut(id).ok_or_else(|| CoreError::UnknownSlot(id.to_owned()))?;
+                if slot.kind != SlotKind::Workspace {
+                    return Err(CoreError::InvalidOperation("GPU can only be reserved by a workspace slot".to_owned()));
+                }
+                if slot.status == SlotStatus::Stopped {
+                    return Err(CoreError::InvalidOperation("GPU cannot be reserved by a stopped slot".to_owned()));
+                }
+                slot.allocation.gpu = access;
+                slot.id.clone()
+            };
+            self.gpu.reserved_by = Some(reserved_id);
         }
         self.updated_at_unix_ms = unix_time_ms();
         Ok(())
