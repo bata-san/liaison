@@ -1,12 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import "./styles.css";
 
 type Mode = "remote" | "class" | "local_exclusive" | "maintenance";
 type SlotKind = "persistent" | "workspace";
 type SlotStatus = "stopped" | "starting" | "running" | "throttled" | "draining" | "error";
 type GpuAccess = "none" | "shared" | "exclusive";
+type WeightMap = Record<string, number>;
 
 interface Allocation {
   cpu_threads: number;
@@ -40,11 +42,7 @@ interface SystemSnapshot {
   runtime: "mock" | "wsl-docker";
   service_online: boolean;
   tailscale_online: boolean;
-  host: {
-    cpu_percent: number;
-    memory_used_mib: number;
-    memory_total_mib: number;
-  };
+  host: { cpu_percent: number; memory_used_mib: number; memory_total_mib: number };
   gpu: {
     utilization_percent: number;
     memory_used_mib: number;
@@ -57,24 +55,14 @@ interface SystemSnapshot {
   updated_at_unix_ms: number;
 }
 
-interface TileLayout {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
 interface PlannedWorker {
   id: string;
   allocation: Allocation;
 }
 
-const GRID_COLUMNS = 24;
-const GRID_ROWS = 16;
-const WORKER_MAX_WIDTH = 18;
-const WORKER_MAX_HEIGHT = 13;
 const MIN_WORKER_CPU = 1;
 const MIN_WORKER_MEMORY_MIB = 512;
+const MIN_PANEL_PERCENT = 5;
 
 const modeLabels: Record<Mode, string> = {
   remote: "Remote",
@@ -90,8 +78,6 @@ const gpuLabels: Record<GpuAccess, string> = {
 };
 
 const isActive = (slot: SlotSummary): boolean => slot.status !== "stopped";
-const clamp = (value: number, minimum: number, maximum: number): number =>
-  Math.min(maximum, Math.max(minimum, value));
 const formatGiB = (mib: number): string => {
   const value = mib / 1024;
   return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)} GB`;
@@ -101,72 +87,108 @@ async function call<T>(command: string, args: Record<string, unknown> = {}): Pro
   return invoke<T>(command, args);
 }
 
-function splitCapacity(total: number, count: number, minimum: number): number[] {
-  if (count <= 0) return [];
-  const safeTotal = Math.max(total, minimum * count);
-  const base = Math.floor(safeTotal / count);
-  const remainder = safeTotal % count;
-  return Array.from({ length: count }, (_, index) => base + (index < remainder ? 1 : 0));
+function normalizeWeights(input: WeightMap, ids: string[]): WeightMap {
+  if (ids.length === 0) return {};
+  const values = ids.map((id) => Math.max(0, Number(input[id]) || 0));
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) {
+    const equal = 100 / ids.length;
+    return Object.fromEntries(ids.map((id) => [id, equal]));
+  }
+  return Object.fromEntries(ids.map((id, index) => [id, (values[index] / total) * 100]));
 }
 
-function collides(candidate: TileLayout, other: TileLayout): boolean {
-  return !(
-    candidate.x + candidate.w <= other.x
-    || other.x + other.w <= candidate.x
-    || candidate.y + candidate.h <= other.y
-    || other.y + other.h <= candidate.y
+function equalWeights(ids: string[]): WeightMap {
+  return normalizeWeights({}, ids);
+}
+
+function weightsFromSnapshot(workers: SlotSummary[]): WeightMap {
+  const total = workers.reduce((sum, worker) => sum + worker.allocation.cpu_threads, 0);
+  if (total <= 0) return equalWeights(workers.map((worker) => worker.id));
+  return Object.fromEntries(
+    workers.map((worker) => [worker.id, (worker.allocation.cpu_threads / total) * 100])
   );
 }
 
-function fitsBoard(candidate: TileLayout): boolean {
-  return candidate.x >= 0
-    && candidate.y >= 0
-    && candidate.x + candidate.w <= GRID_COLUMNS
-    && candidate.y + candidate.h <= GRID_ROWS;
+function addWorkerWeight(current: WeightMap, existingIds: string[], newId: string): WeightMap {
+  if (existingIds.length === 0) return { [newId]: 100 };
+  const newShare = 100 / (existingIds.length + 1);
+  const scale = (100 - newShare) / 100;
+  const normalized = normalizeWeights(current, existingIds);
+  return normalizeWeights(
+    {
+      ...Object.fromEntries(existingIds.map((id) => [id, normalized[id] * scale])),
+      [newId]: newShare
+    },
+    [...existingIds, newId]
+  );
 }
 
-function findVacancy(occupied: TileLayout[], width: number, height: number): TileLayout {
-  for (let y = 0; y <= GRID_ROWS - height; y += 1) {
-    for (let x = 0; x <= GRID_COLUMNS - width; x += 1) {
-      const candidate = { x, y, w: width, h: height };
-      if (!occupied.some((other) => collides(candidate, other))) return candidate;
-    }
+function allocateWeighted(
+  total: number,
+  weights: WeightMap,
+  ids: string[],
+  minimum: number,
+  quantum = 1
+): Record<string, number> {
+  if (ids.length === 0) return {};
+  const totalUnits = Math.floor(total / quantum);
+  const minimumUnits = Math.ceil(minimum / quantum);
+  const distributable = Math.max(0, totalUnits - minimumUnits * ids.length);
+  const normalized = normalizeWeights(weights, ids);
+  const rawExtras = ids.map((id) => (normalized[id] / 100) * distributable);
+  const extraUnits = rawExtras.map(Math.floor);
+  let remainder = distributable - extraUnits.reduce((sum, value) => sum + value, 0);
+  const order = rawExtras
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((left, right) => right.fraction - left.fraction);
+  for (const entry of order) {
+    if (remainder <= 0) break;
+    extraUnits[entry.index] += 1;
+    remainder -= 1;
   }
-  return {
-    x: 0,
-    y: 0,
-    w: Math.min(width, GRID_COLUMNS),
-    h: Math.min(height, GRID_ROWS)
-  };
+  return Object.fromEntries(
+    ids.map((id, index) => [id, (minimumUnits + extraUnits[index]) * quantum])
+  );
 }
 
-function desiredTileSize(slot: SlotSummary, workspacePool: PoolSummary): Pick<TileLayout, "w" | "h"> {
-  if (slot.kind === "persistent") return { w: 4, h: 3 };
-  const cpuRatio = workspacePool.cpu_capacity_threads > 0
-    ? slot.allocation.cpu_threads / workspacePool.cpu_capacity_threads
-    : 0;
-  const memoryRatio = workspacePool.memory_capacity_mib > 0
-    ? slot.allocation.memory_mib / workspacePool.memory_capacity_mib
-    : 0;
-  return {
-    w: clamp(Math.round(cpuRatio * WORKER_MAX_WIDTH), 4, WORKER_MAX_WIDTH),
-    h: clamp(Math.round(memoryRatio * WORKER_MAX_HEIGHT), 3, WORKER_MAX_HEIGHT)
-  };
+function planFromWeights(
+  snapshot: SystemSnapshot,
+  workers: SlotSummary[],
+  weights: WeightMap
+): PlannedWorker[] {
+  const pool = snapshot.pools.find((candidate) => candidate.id === "workspace");
+  if (!pool || workers.length === 0) return [];
+  const ids = workers.map((worker) => worker.id);
+  const cpu = allocateWeighted(pool.cpu_capacity_threads, weights, ids, MIN_WORKER_CPU);
+  const memory = allocateWeighted(
+    pool.memory_capacity_mib,
+    weights,
+    ids,
+    MIN_WORKER_MEMORY_MIB,
+    512
+  );
+  return workers.map((worker) => ({
+    id: worker.id,
+    allocation: {
+      cpu_threads: cpu[worker.id],
+      memory_mib: memory[worker.id],
+      gpu: worker.allocation.gpu
+    }
+  }));
 }
 
 function nextGpuAccess(current: GpuAccess): GpuAccess {
-  if (current === "none") return "shared";
   if (current === "shared") return "exclusive";
-  return "none";
+  if (current === "exclusive") return "none";
+  return "shared";
 }
 
 function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
-  const [layouts, setLayouts] = useState<Record<string, TileLayout>>({});
-  const [draftLayout, setDraftLayout] = useState<TileLayout | null>(null);
+  const [weights, setWeights] = useState<WeightMap>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const boardRef = useRef<HTMLDivElement | null>(null);
   const busyRef = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -184,45 +206,6 @@ function App(): React.JSX.Element {
     const timer = window.setInterval(() => void refresh(), 3000);
     return () => window.clearInterval(timer);
   }, [refresh]);
-
-  const slots = snapshot?.slots ?? [];
-  const persistent = useMemo(
-    () => slots.filter((slot) => slot.kind === "persistent" && isActive(slot)),
-    [slots]
-  );
-  const workers = useMemo(
-    () => slots.filter((slot) => slot.kind === "workspace"),
-    [slots]
-  );
-  const activeWorkers = useMemo(() => workers.filter(isActive), [workers]);
-  const workspacePool = snapshot?.pools.find((pool) => pool.id === "workspace");
-  const persistentPool = snapshot?.pools.find((pool) => pool.id === "persistent");
-  const canAdd = workers.some((worker) => !isActive(worker))
-    && snapshot !== null
-    && snapshot.mode !== "local_exclusive"
-    && snapshot.mode !== "maintenance";
-
-  useEffect(() => {
-    if (!snapshot || !workspacePool) return;
-    const activeSlots = [...persistent, ...activeWorkers];
-    setLayouts((current) => {
-      const next: Record<string, TileLayout> = {};
-      const occupied: TileLayout[] = [];
-      for (const slot of activeSlots) {
-        const size = desiredTileSize(slot, workspacePool);
-        const previous = current[slot.id];
-        const candidate = previous
-          ? { x: previous.x, y: previous.y, ...size }
-          : findVacancy(occupied, size.w, size.h);
-        const placed = fitsBoard(candidate) && !occupied.some((other) => collides(candidate, other))
-          ? candidate
-          : findVacancy(occupied, size.w, size.h);
-        next[slot.id] = placed;
-        occupied.push(placed);
-      }
-      return next;
-    });
-  }, [snapshot, workspacePool, persistent, activeWorkers]);
 
   const run = useCallback(async (action: () => Promise<SystemSnapshot>): Promise<SystemSnapshot | null> => {
     if (busyRef.current) return null;
@@ -242,6 +225,37 @@ function App(): React.JSX.Element {
     }
   }, []);
 
+  const slots = snapshot?.slots ?? [];
+  const persistent = useMemo(
+    () => slots.filter((slot) => slot.kind === "persistent" && isActive(slot)),
+    [slots]
+  );
+  const workers = useMemo(() => slots.filter((slot) => slot.kind === "workspace"), [slots]);
+  const activeWorkers = useMemo(
+    () => workers.filter(isActive).sort((left, right) => left.id.localeCompare(right.id)),
+    [workers]
+  );
+  const activeIds = useMemo(() => activeWorkers.map((worker) => worker.id), [activeWorkers]);
+  const activeKey = activeIds.join(":");
+  const workspacePool = snapshot?.pools.find((pool) => pool.id === "workspace");
+  const persistentPool = snapshot?.pools.find((pool) => pool.id === "persistent");
+  const canAdd = workers.some((worker) => !isActive(worker))
+    && snapshot !== null
+    && snapshot.mode !== "local_exclusive"
+    && snapshot.mode !== "maintenance";
+
+  useEffect(() => {
+    if (activeWorkers.length === 0) {
+      setWeights({});
+      return;
+    }
+    setWeights((current) => {
+      const currentIds = Object.keys(current).sort().join(":");
+      if (currentIds === activeKey) return normalizeWeights(current, activeIds);
+      return weightsFromSnapshot(activeWorkers);
+    });
+  }, [activeKey, activeIds, activeWorkers]);
+
   const assign = useCallback((worker: PlannedWorker): Promise<SystemSnapshot> => (
     call<SystemSnapshot>("assign_worker", {
       slotId: worker.id,
@@ -256,218 +270,122 @@ function App(): React.JSX.Element {
     plan: PlannedWorker[]
   ): Promise<SystemSnapshot> => {
     let current = base;
-    const activeIds = new Set(plan.map((worker) => worker.id));
-    const currentWorkers = current.slots.filter(
-      (slot) => slot.kind === "workspace" && isActive(slot) && activeIds.has(slot.id)
-    );
+    const targetById = new Map(plan.map((worker) => [worker.id, worker]));
+    const active = current.slots
+      .filter((slot) => slot.kind === "workspace" && isActive(slot) && targetById.has(slot.id))
+      .sort((left, right) => {
+        const leftExclusive = left.allocation.gpu === "exclusive" ? -1 : 0;
+        const rightExclusive = right.allocation.gpu === "exclusive" ? -1 : 0;
+        return leftExclusive - rightExclusive;
+      });
 
-    for (const slot of currentWorkers) {
+    for (const slot of active) {
+      const target = targetById.get(slot.id);
+      if (!target) continue;
       current = await assign({
         id: slot.id,
         allocation: {
           cpu_threads: MIN_WORKER_CPU,
           memory_mib: MIN_WORKER_MEMORY_MIB,
-          gpu: slot.allocation.gpu
+          gpu: target.allocation.gpu
         }
       });
+    }
+
+    for (const worker of plan) {
+      const slot = current.slots.find((candidate) => candidate.id === worker.id);
+      if (!slot || !isActive(slot)) {
+        current = await assign({
+          id: worker.id,
+          allocation: {
+            cpu_threads: MIN_WORKER_CPU,
+            memory_mib: MIN_WORKER_MEMORY_MIB,
+            gpu: worker.allocation.gpu
+          }
+        });
+      }
     }
 
     for (const worker of plan) current = await assign(worker);
     return current;
   }, [assign]);
 
-  const balancedPlan = useCallback((base: SystemSnapshot, ids: string[]): PlannedWorker[] => {
-    const pool = base.pools.find((candidate) => candidate.id === "workspace");
-    if (!pool || ids.length === 0) return [];
-    const cpuValues = splitCapacity(pool.cpu_capacity_threads, ids.length, MIN_WORKER_CPU);
-    const memoryValues = splitCapacity(
-      pool.memory_capacity_mib,
-      ids.length,
-      MIN_WORKER_MEMORY_MIB
-    );
-    return ids.map((id, index) => {
-      const slot = base.slots.find((candidate) => candidate.id === id);
-      return {
-        id,
-        allocation: {
-          cpu_threads: cpuValues[index],
-          memory_mib: memoryValues[index],
-          gpu: slot?.allocation.gpu ?? "none"
-        }
-      };
-    });
-  }, []);
-
-  const planForLayout = useCallback((
-    base: SystemSnapshot,
-    slotId: string,
-    layout: TileLayout
-  ): PlannedWorker[] => {
-    const pool = base.pools.find((candidate) => candidate.id === "workspace");
-    const ids = base.slots
+  const applyWeights = useCallback((base: SystemSnapshot, nextWeights: WeightMap): Promise<SystemSnapshot> => {
+    const active = base.slots
       .filter((slot) => slot.kind === "workspace" && isActive(slot))
-      .map((slot) => slot.id)
-      .sort();
-    if (!pool || ids.length === 0) return [];
+      .sort((left, right) => left.id.localeCompare(right.id));
+    return executePlan(base, planFromWeights(base, active, nextWeights));
+  }, [executePlan]);
 
-    const count = ids.length;
-    const maximumCpu = pool.cpu_capacity_threads - MIN_WORKER_CPU * (count - 1);
-    const maximumMemory = pool.memory_capacity_mib - MIN_WORKER_MEMORY_MIB * (count - 1);
-    const requestedCpu = count === 1
-      ? pool.cpu_capacity_threads
-      : clamp(
-          Math.round((layout.w / WORKER_MAX_WIDTH) * pool.cpu_capacity_threads),
-          MIN_WORKER_CPU,
-          maximumCpu
-        );
-    const requestedMemory = count === 1
-      ? pool.memory_capacity_mib
-      : clamp(
-          Math.round((layout.h / WORKER_MAX_HEIGHT) * pool.memory_capacity_mib / 512) * 512,
-          MIN_WORKER_MEMORY_MIB,
-          maximumMemory
-        );
-    const otherIds = ids.filter((id) => id !== slotId);
-    const otherCpu = splitCapacity(
-      pool.cpu_capacity_threads - requestedCpu,
-      otherIds.length,
-      MIN_WORKER_CPU
-    );
-    const otherMemory = splitCapacity(
-      pool.memory_capacity_mib - requestedMemory,
-      otherIds.length,
-      MIN_WORKER_MEMORY_MIB
-    );
-
-    return ids.map((id) => {
-      const slot = base.slots.find((candidate) => candidate.id === id);
-      if (id === slotId) {
-        return {
-          id,
-          allocation: {
-            cpu_threads: requestedCpu,
-            memory_mib: requestedMemory,
-            gpu: slot?.allocation.gpu ?? "none"
-          }
-        };
-      }
-      const index = otherIds.indexOf(id);
-      return {
-        id,
-        allocation: {
-          cpu_threads: otherCpu[index],
-          memory_mib: otherMemory[index],
-          gpu: slot?.allocation.gpu ?? "none"
-        }
-      };
-    });
-  }, []);
-
-  const addWorker = useCallback((requestedLayout?: TileLayout) => {
-    if (!snapshot || !workspacePool || busy) return;
+  const addWorker = useCallback(() => {
+    if (!snapshot || !canAdd || busy) return;
     const next = workers.find((worker) => !isActive(worker));
     if (!next) return;
-    if (requestedLayout) {
-      setLayouts((current) => ({ ...current, [next.id]: requestedLayout }));
-    }
+    const targetWeights = addWorkerWeight(normalizeWeights(weights, activeIds), activeIds, next.id);
+    setWeights(targetWeights);
+
     void run(async () => {
-      let current = await assign({
+      let current = snapshot;
+      const active = current.slots
+        .filter((slot) => slot.kind === "workspace" && isActive(slot))
+        .sort((left, right) => {
+          const leftExclusive = left.allocation.gpu === "exclusive" ? -1 : 0;
+          const rightExclusive = right.allocation.gpu === "exclusive" ? -1 : 0;
+          return leftExclusive - rightExclusive;
+        });
+
+      for (const worker of active) {
+        current = await assign({
+          id: worker.id,
+          allocation: {
+            cpu_threads: MIN_WORKER_CPU,
+            memory_mib: MIN_WORKER_MEMORY_MIB,
+            gpu: snapshot.mode === "remote" && snapshot.gpu.available ? "shared" : "none"
+          }
+        });
+      }
+
+      current = await assign({
         id: next.id,
         allocation: {
           cpu_threads: MIN_WORKER_CPU,
           memory_mib: MIN_WORKER_MEMORY_MIB,
-          gpu: "none"
+          gpu: snapshot.mode === "remote" && snapshot.gpu.available ? "shared" : "none"
         }
       });
-      const ids = current.slots
+
+      const nextActive = current.slots
         .filter((slot) => slot.kind === "workspace" && isActive(slot))
-        .map((slot) => slot.id)
-        .sort();
-      const plan = requestedLayout
-        ? planForLayout(current, next.id, requestedLayout)
-        : balancedPlan(current, ids);
-      current = await executePlan(current, plan);
-      return current;
+        .sort((left, right) => left.id.localeCompare(right.id));
+      const plan = planFromWeights(current, nextActive, targetWeights).map((worker) => ({
+        ...worker,
+        allocation: {
+          ...worker.allocation,
+          gpu: snapshot.mode === "remote" && snapshot.gpu.available ? "shared" : "none"
+        }
+      }));
+      return executePlan(current, plan);
     });
-  }, [
-    snapshot,
-    workspacePool,
-    busy,
-    workers,
-    run,
-    assign,
-    executePlan,
-    balancedPlan,
-    planForLayout
-  ]);
+  }, [snapshot, canAdd, busy, workers, weights, activeIds, run, assign, executePlan]);
 
   const removeWorker = useCallback((slotId: string) => {
     if (!snapshot || busy) return;
+    const remainingIds = activeIds.filter((id) => id !== slotId);
+    const targetWeights = normalizeWeights(weights, remainingIds);
+    setWeights(targetWeights);
     void run(async () => {
       let current = await call<SystemSnapshot>("stop_slot", { slotId });
-      const ids = current.slots
-        .filter((slot) => slot.kind === "workspace" && isActive(slot))
-        .map((slot) => slot.id)
-        .sort();
-      if (ids.length > 0) current = await executePlan(current, balancedPlan(current, ids));
+      if (remainingIds.length > 0) current = await applyWeights(current, targetWeights);
       return current;
     });
-  }, [snapshot, busy, run, executePlan, balancedPlan]);
+  }, [snapshot, busy, activeIds, weights, run, applyWeights]);
 
-  const resizeWorker = useCallback((slotId: string, layout: TileLayout) => {
-    if (!snapshot || !workspacePool || busy) return;
-    void run(() => executePlan(snapshot, planForLayout(snapshot, slotId, layout)));
-  }, [snapshot, workspacePool, busy, run, executePlan, planForLayout]);
-
-  const startCreateGesture = useCallback((event: React.PointerEvent<HTMLElement>) => {
-    if (!canAdd || busy || event.target !== event.currentTarget) return;
-    const board = boardRef.current;
-    if (!board) return;
-    event.preventDefault();
-    const bounds = board.getBoundingClientRect();
-    const originX = clamp(
-      Math.floor(((event.clientX - bounds.left) / bounds.width) * GRID_COLUMNS),
-      0,
-      GRID_COLUMNS - 1
-    );
-    const originY = clamp(
-      Math.floor(((event.clientY - bounds.top) / bounds.height) * GRID_ROWS),
-      0,
-      GRID_ROWS - 1
-    );
-    let latest: TileLayout = { x: originX, y: originY, w: 4, h: 3 };
-    setDraftLayout(latest);
-
-    const move = (pointer: PointerEvent): void => {
-      const currentX = clamp(
-        Math.ceil(((pointer.clientX - bounds.left) / bounds.width) * GRID_COLUMNS),
-        originX + 1,
-        GRID_COLUMNS
-      );
-      const currentY = clamp(
-        Math.ceil(((pointer.clientY - bounds.top) / bounds.height) * GRID_ROWS),
-        originY + 1,
-        GRID_ROWS
-      );
-      latest = {
-        x: originX,
-        y: originY,
-        w: clamp(currentX - originX, 4, WORKER_MAX_WIDTH),
-        h: clamp(currentY - originY, 3, WORKER_MAX_HEIGHT)
-      };
-      setDraftLayout(latest);
-    };
-
-    const end = (): void => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      setDraftLayout(null);
-      addWorker(latest);
-    };
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", end, { once: true });
-  }, [canAdd, busy, addWorker]);
+  const equalize = useCallback(() => {
+    if (!snapshot || busy || activeIds.length === 0) return;
+    const targetWeights = equalWeights(activeIds);
+    setWeights(targetWeights);
+    void run(() => applyWeights(snapshot, targetWeights));
+  }, [snapshot, busy, activeIds, run, applyWeights]);
 
   const cycleGpu = useCallback((worker: SlotSummary) => {
     if (!snapshot || busy || snapshot.mode !== "remote") return;
@@ -483,59 +401,19 @@ function App(): React.JSX.Element {
     void run(() => call<SystemSnapshot>("set_mode", { mode }));
   }, [snapshot, busy, run]);
 
-  const startGesture = useCallback((
-    event: React.PointerEvent<HTMLElement>,
-    slot: SlotSummary,
-    gesture: "move" | "resize"
+  const handleLiveLayout = useCallback((layout: WeightMap) => {
+    setWeights(normalizeWeights(layout, activeIds));
+  }, [activeIds]);
+
+  const handleCommittedLayout = useCallback((
+    layout: WeightMap,
+    meta: { isUserInteraction: boolean }
   ) => {
-    if (busy || slot.kind === "persistent") return;
-    const board = boardRef.current;
-    const original = layouts[slot.id];
-    if (!board || !original) return;
-    event.preventDefault();
-    event.stopPropagation();
-
-    const bounds = board.getBoundingClientRect();
-    const startX = event.clientX;
-    const startY = event.clientY;
-    let latest = original;
-
-    const move = (pointer: PointerEvent): void => {
-      const deltaX = Math.round(((pointer.clientX - startX) / bounds.width) * GRID_COLUMNS);
-      const deltaY = Math.round(((pointer.clientY - startY) / bounds.height) * GRID_ROWS);
-      const candidate = gesture === "move"
-        ? {
-            ...original,
-            x: clamp(original.x + deltaX, 0, GRID_COLUMNS - original.w),
-            y: clamp(original.y + deltaY, 0, GRID_ROWS - original.h)
-          }
-        : {
-            ...original,
-            w: clamp(original.w + deltaX, 4, WORKER_MAX_WIDTH),
-            h: clamp(original.h + deltaY, 3, WORKER_MAX_HEIGHT)
-          };
-
-      setLayouts((current) => {
-        const occupied = Object.entries(current)
-          .filter(([id]) => id !== slot.id)
-          .map(([, layout]) => layout);
-        if (!fitsBoard(candidate) || occupied.some((other) => collides(candidate, other))) {
-          return current;
-        }
-        latest = candidate;
-        return { ...current, [slot.id]: candidate };
-      });
-    };
-
-    const end = (): void => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      if (gesture === "resize" && latest !== original) resizeWorker(slot.id, latest);
-    };
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", end, { once: true });
-  }, [busy, layouts, resizeWorker]);
+    if (!snapshot || busy || !meta.isUserInteraction) return;
+    const targetWeights = normalizeWeights(layout, activeIds);
+    setWeights(targetWeights);
+    void run(() => applyWeights(snapshot, targetWeights));
+  }, [snapshot, busy, activeIds, run, applyWeights]);
 
   if (!snapshot || !workspacePool || !persistentPool) {
     return (
@@ -547,9 +425,12 @@ function App(): React.JSX.Element {
     );
   }
 
-  const activeSlots = [...persistent, ...activeWorkers];
+  const normalizedWeights = normalizeWeights(weights, activeIds);
+  const previewPlan = planFromWeights(snapshot, activeWorkers, normalizedWeights);
+  const previewById = new Map(previewPlan.map((worker) => [worker.id, worker.allocation]));
   const totalCpu = persistentPool.cpu_capacity_threads + workspacePool.cpu_capacity_threads;
   const totalMemory = persistentPool.memory_capacity_mib + workspacePool.memory_capacity_mib;
+
   return (
     <div className={`app-shell ${busy ? "busy" : ""}`}>
       <header className="topbar">
@@ -570,127 +451,153 @@ function App(): React.JSX.Element {
         <div className="capacity-line">
           <span>{totalCpu} CPU</span>
           <span>{formatGiB(totalMemory)}</span>
-          <span className={snapshot.gpu.available ? "online" : "offline"}>GPU</span>
+          <span className={snapshot.tailscale_online ? "online" : "offline"}>
+            {snapshot.tailscale_online ? "Online" : "Offline"}
+          </span>
         </div>
       </header>
 
       <main className="dashboard">
-        <div className="board-toolbar">
-          <div>
-            <strong>{activeWorkers.length} worker{activeWorkers.length === 1 ? "" : "s"}</strong>
-            <span>Drag to arrange. Resize a corner to redistribute the W pool.</span>
-          </div>
-          <button type="button" className="add-worker" disabled={!canAdd || busy} onClick={() => addWorker()}>
-            <span>＋</span> Worker
-          </button>
-        </div>
-
-        {error && <div className="error-toast">{error}</div>}
-
-        <section
-          className="bento-board"
-          ref={boardRef}
-          onPointerDown={startCreateGesture}
-          aria-label="Managed capacity bento board"
-        >
-          {draftLayout && (
-            <div
-              className="draft-tile"
-              style={{
-                left: `${(draftLayout.x / GRID_COLUMNS) * 100}%`,
-                top: `${(draftLayout.y / GRID_ROWS) * 100}%`,
-                width: `${(draftLayout.w / GRID_COLUMNS) * 100}%`,
-                height: `${(draftLayout.h / GRID_ROWS) * 100}%`
-              }}
-            >
-              <strong>New worker</strong>
-              <small>Release to fit</small>
+        <section className="workspace-shell">
+          <header className="workspace-toolbar">
+            <div>
+              <p>W pool</p>
+              <strong>{workspacePool.cpu_capacity_threads} CPU · {formatGiB(workspacePool.memory_capacity_mib)}</strong>
+              <span>Drag a divider to change each worker weight.</span>
             </div>
-          )}
-
-          {activeSlots.map((slot) => {
-            const layout = layouts[slot.id];
-            if (!layout) return null;
-            const compact = layout.w <= 5 || layout.h <= 3;
-            const isPersistent = slot.kind === "persistent";
-            return (
-              <article
-                className={`bento-tile ${slot.kind} ${compact ? "compact" : ""}`}
-                key={slot.id}
-                style={{
-                  left: `${(layout.x / GRID_COLUMNS) * 100}%`,
-                  top: `${(layout.y / GRID_ROWS) * 100}%`,
-                  width: `${(layout.w / GRID_COLUMNS) * 100}%`,
-                  height: `${(layout.h / GRID_ROWS) * 100}%`
-                }}
-                onDoubleClick={(event) => event.stopPropagation()}
-                onPointerDown={(event) => startGesture(event, slot, "move")}
+            <div className="toolbar-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={busy || activeIds.length < 2}
+                onClick={equalize}
               >
-                <header>
-                  <div>
-                    <strong>{slot.id}</strong>
-                    <span>{isPersistent ? "Persistent" : slot.status}</span>
-                  </div>
-                  {!isPersistent && (
-                    <button
-                      type="button"
-                      className="tile-remove"
-                      aria-label={`Remove ${slot.id}`}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        removeWorker(slot.id);
-                      }}
-                    >
-                      ×
-                    </button>
-                  )}
-                </header>
+                Equalize
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={!canAdd || busy}
+                onClick={addWorker}
+              >
+                ＋ Worker
+              </button>
+            </div>
+          </header>
 
-                <div className="tile-specs">
-                  <div><b>{slot.allocation.cpu_threads}</b><span>CPU</span></div>
-                  <div><b>{formatGiB(slot.allocation.memory_mib).replace(" GB", "")}</b><span>GB</span></div>
-                </div>
+          <div className="managed-board">
+            <div className="persistent-rail" aria-label="Persistent layer">
+              <div className="rail-heading">
+                <span>P layer</span>
+                <small>{persistentPool.cpu_capacity_threads} CPU · {formatGiB(persistentPool.memory_capacity_mib)}</small>
+              </div>
+              <div className="persistent-list">
+                {persistent.map((slot) => (
+                  <article className="persistent-card" key={slot.id}>
+                    <div><strong>{slot.id}</strong><span>{slot.status}</span></div>
+                    <p>{slot.allocation.cpu_threads} CPU</p>
+                    <p>{formatGiB(slot.allocation.memory_mib)}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
 
-                <footer>
-                  {isPersistent ? (
-                    <span className="locked">Locked</span>
-                  ) : (
-                    <button
-                      type="button"
-                      className={`gpu-chip ${slot.allocation.gpu}`}
-                      disabled={snapshot.mode !== "remote" || busy}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        cycleGpu(slot);
-                      }}
-                    >
-                      {gpuLabels[slot.allocation.gpu]}
-                    </button>
-                  )}
-                </footer>
+            <div className="worker-pool">
+              {activeWorkers.length === 0 ? (
+                <button
+                  type="button"
+                  className="empty-pool"
+                  disabled={!canAdd || busy}
+                  onClick={addWorker}
+                >
+                  <span>＋</span>
+                  <strong>Add the first worker</strong>
+                  <small>It receives 100% of the W pool and Shared GPU access.</small>
+                </button>
+              ) : (
+                <Group
+                  key={activeKey}
+                  id={`worker-weight-group-${activeKey}`}
+                  orientation="horizontal"
+                  className="worker-group"
+                  defaultLayout={normalizedWeights}
+                  disabled={busy}
+                  onLayoutChange={handleLiveLayout}
+                  onLayoutChanged={handleCommittedLayout}
+                >
+                  {activeWorkers.map((worker, index) => {
+                    const allocation = previewById.get(worker.id) ?? worker.allocation;
+                    const weight = normalizedWeights[worker.id] ?? 0;
+                    return (
+                      <React.Fragment key={worker.id}>
+                        {index > 0 && (
+                          <Separator
+                            className="split-separator"
+                            title="Drag to change worker weight"
+                          >
+                            <span aria-hidden="true"><i /><i /><i /></span>
+                          </Separator>
+                        )}
+                        <Panel
+                          id={worker.id}
+                          defaultSize={`${weight}%`}
+                          minSize={`${MIN_PANEL_PERCENT}%`}
+                          className="worker-panel"
+                        >
+                          <article className="worker-card">
+                            <header>
+                              <div>
+                                <strong>{worker.id}</strong>
+                                <span>{worker.status}</span>
+                              </div>
+                              <button
+                                type="button"
+                                className="remove-button"
+                                aria-label={`Remove ${worker.id}`}
+                                disabled={busy}
+                                onClick={() => removeWorker(worker.id)}
+                              >
+                                ×
+                              </button>
+                            </header>
 
-                {!isPersistent && (
-                  <button
-                    type="button"
-                    className="resize-handle"
-                    aria-label={`Resize ${slot.id}`}
-                    onPointerDown={(event) => startGesture(event, slot, "resize")}
-                  />
-                )}
-              </article>
-            );
-          })}
+                            <div className="weight-display">
+                              <strong>{weight.toFixed(weight < 10 ? 1 : 0)}%</strong>
+                              <span>weight</span>
+                            </div>
 
-          {activeWorkers.length === 0 && (
-            <button type="button" className="empty-board" disabled={!canAdd} onPointerDown={(event) => event.stopPropagation()} onClick={() => addWorker()}>
-              <span>＋</span>
-              <strong>Create a worker block</strong>
-              <small>Click here or drag anywhere on the canvas.</small>
-            </button>
-          )}
+                            <div className="worker-specs">
+                              <div><strong>{allocation.cpu_threads}</strong><span>CPU</span></div>
+                              <div>
+                                <strong>{formatGiB(allocation.memory_mib).replace(" GB", "")}</strong>
+                                <span>GB</span>
+                              </div>
+                            </div>
+
+                            <footer>
+                              <button
+                                type="button"
+                                className={`gpu-button ${worker.allocation.gpu}`}
+                                title="Click to switch Shared, Exclusive, or Off"
+                                disabled={snapshot.mode !== "remote" || busy}
+                                onClick={() => cycleGpu(worker)}
+                              >
+                                {gpuLabels[worker.allocation.gpu]}
+                              </button>
+                            </footer>
+                          </article>
+                        </Panel>
+                      </React.Fragment>
+                    );
+                  })}
+                </Group>
+              )}
+            </div>
+          </div>
         </section>
+
+        {busy && <div className="apply-indicator">Applying allocation…</div>}
+        {error && <div className="error-toast">{error}</div>}
       </main>
     </div>
   );
