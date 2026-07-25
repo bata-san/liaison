@@ -28,31 +28,23 @@ jobs:
         working-directory: apps/liaison-desktop
         run: npm run build
 
-      - name: Run Rust tests
-        id: rust_tests
-        shell: powershell
-        continue-on-error: true
-        run: |
-          $Output = & cargo test --workspace 2>&1
-          $ExitCode = $LASTEXITCODE
-          $Output | Out-File -FilePath cargo-test.log -Encoding utf8
-          if ($ExitCode -ne 0) {
-            $Output | Select-Object -Last 160
-            exit $ExitCode
-          }
+      - name: Test core scheduler
+        run: cargo test -p liaison-core
 
-      - name: Upload Rust diagnostics
-        if: steps.rust_tests.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-test-diagnostics
-          path: cargo-test.log
-          if-no-files-found: error
+      - name: Test protocol
+        run: cargo test -p liaison-protocol
 
-      - name: Fail after Rust test diagnostics
-        if: steps.rust_tests.outcome == 'failure'
-        shell: powershell
-        run: exit 1
+      - name: Test client
+        run: cargo test -p liaison-client
+
+      - name: Test runtime adapters
+        run: cargo test -p liaison-runtime
+
+      - name: Test service orchestration
+        run: cargo test -p liaison-service
+
+      - name: Check desktop Rust bridge
+        run: cargo check -p liaison-desktop
 
       - name: Build Windows binaries
         run: cargo build -p liaison-service -p liaison-cli -p liaison-desktop
