@@ -163,6 +163,7 @@ function nextGpuAccess(current: GpuAccess): GpuAccess {
 function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [layouts, setLayouts] = useState<Record<string, TileLayout>>({});
+  const [draftLayout, setDraftLayout] = useState<TileLayout | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const boardRef = useRef<HTMLDivElement | null>(null);
@@ -196,6 +197,10 @@ function App(): React.JSX.Element {
   const activeWorkers = useMemo(() => workers.filter(isActive), [workers]);
   const workspacePool = snapshot?.pools.find((pool) => pool.id === "workspace");
   const persistentPool = snapshot?.pools.find((pool) => pool.id === "persistent");
+  const canAdd = workers.some((worker) => !isActive(worker))
+    && snapshot !== null
+    && snapshot.mode !== "local_exclusive"
+    && snapshot.mode !== "maintenance";
 
   useEffect(() => {
     if (!snapshot || !workspacePool) return;
@@ -293,10 +298,78 @@ function App(): React.JSX.Element {
     });
   }, []);
 
-  const addWorker = useCallback(() => {
+  const planForLayout = useCallback((
+    base: SystemSnapshot,
+    slotId: string,
+    layout: TileLayout
+  ): PlannedWorker[] => {
+    const pool = base.pools.find((candidate) => candidate.id === "workspace");
+    const ids = base.slots
+      .filter((slot) => slot.kind === "workspace" && isActive(slot))
+      .map((slot) => slot.id)
+      .sort();
+    if (!pool || ids.length === 0) return [];
+
+    const count = ids.length;
+    const maximumCpu = pool.cpu_capacity_threads - MIN_WORKER_CPU * (count - 1);
+    const maximumMemory = pool.memory_capacity_mib - MIN_WORKER_MEMORY_MIB * (count - 1);
+    const requestedCpu = count === 1
+      ? pool.cpu_capacity_threads
+      : clamp(
+          Math.round((layout.w / WORKER_MAX_WIDTH) * pool.cpu_capacity_threads),
+          MIN_WORKER_CPU,
+          maximumCpu
+        );
+    const requestedMemory = count === 1
+      ? pool.memory_capacity_mib
+      : clamp(
+          Math.round((layout.h / WORKER_MAX_HEIGHT) * pool.memory_capacity_mib / 512) * 512,
+          MIN_WORKER_MEMORY_MIB,
+          maximumMemory
+        );
+    const otherIds = ids.filter((id) => id !== slotId);
+    const otherCpu = splitCapacity(
+      pool.cpu_capacity_threads - requestedCpu,
+      otherIds.length,
+      MIN_WORKER_CPU
+    );
+    const otherMemory = splitCapacity(
+      pool.memory_capacity_mib - requestedMemory,
+      otherIds.length,
+      MIN_WORKER_MEMORY_MIB
+    );
+
+    return ids.map((id) => {
+      const slot = base.slots.find((candidate) => candidate.id === id);
+      if (id === slotId) {
+        return {
+          id,
+          allocation: {
+            cpu_threads: requestedCpu,
+            memory_mib: requestedMemory,
+            gpu: slot?.allocation.gpu ?? "none"
+          }
+        };
+      }
+      const index = otherIds.indexOf(id);
+      return {
+        id,
+        allocation: {
+          cpu_threads: otherCpu[index],
+          memory_mib: otherMemory[index],
+          gpu: slot?.allocation.gpu ?? "none"
+        }
+      };
+    });
+  }, []);
+
+  const addWorker = useCallback((requestedLayout?: TileLayout) => {
     if (!snapshot || !workspacePool || busy) return;
     const next = workers.find((worker) => !isActive(worker));
     if (!next) return;
+    if (requestedLayout) {
+      setLayouts((current) => ({ ...current, [next.id]: requestedLayout }));
+    }
     void run(async () => {
       let current = await assign({
         id: next.id,
@@ -310,10 +383,23 @@ function App(): React.JSX.Element {
         .filter((slot) => slot.kind === "workspace" && isActive(slot))
         .map((slot) => slot.id)
         .sort();
-      current = await executePlan(current, balancedPlan(current, ids));
+      const plan = requestedLayout
+        ? planForLayout(current, next.id, requestedLayout)
+        : balancedPlan(current, ids);
+      current = await executePlan(current, plan);
       return current;
     });
-  }, [snapshot, workspacePool, busy, workers, run, assign, executePlan, balancedPlan]);
+  }, [
+    snapshot,
+    workspacePool,
+    busy,
+    workers,
+    run,
+    assign,
+    executePlan,
+    balancedPlan,
+    planForLayout
+  ]);
 
   const removeWorker = useCallback((slotId: string) => {
     if (!snapshot || busy) return;
@@ -330,59 +416,58 @@ function App(): React.JSX.Element {
 
   const resizeWorker = useCallback((slotId: string, layout: TileLayout) => {
     if (!snapshot || !workspacePool || busy) return;
-    const ids = activeWorkers.map((worker) => worker.id).sort();
-    const count = ids.length;
-    if (count === 0) return;
-    const maximumCpu = workspacePool.cpu_capacity_threads - MIN_WORKER_CPU * (count - 1);
-    const maximumMemory = workspacePool.memory_capacity_mib - MIN_WORKER_MEMORY_MIB * (count - 1);
-    const requestedCpu = clamp(
-      Math.round((layout.w / WORKER_MAX_WIDTH) * workspacePool.cpu_capacity_threads),
-      MIN_WORKER_CPU,
-      maximumCpu
-    );
-    const requestedMemory = clamp(
-      Math.round((layout.h / WORKER_MAX_HEIGHT) * workspacePool.memory_capacity_mib / 512) * 512,
-      MIN_WORKER_MEMORY_MIB,
-      maximumMemory
-    );
+    void run(() => executePlan(snapshot, planForLayout(snapshot, slotId, layout)));
+  }, [snapshot, workspacePool, busy, run, executePlan, planForLayout]);
 
-    void run(async () => {
-      const otherIds = ids.filter((id) => id !== slotId);
-      const otherCpu = splitCapacity(
-        workspacePool.cpu_capacity_threads - requestedCpu,
-        otherIds.length,
-        MIN_WORKER_CPU
+  const startCreateGesture = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (!canAdd || busy || event.target !== event.currentTarget) return;
+    const board = boardRef.current;
+    if (!board) return;
+    event.preventDefault();
+    const bounds = board.getBoundingClientRect();
+    const originX = clamp(
+      Math.floor(((event.clientX - bounds.left) / bounds.width) * GRID_COLUMNS),
+      0,
+      GRID_COLUMNS - 1
+    );
+    const originY = clamp(
+      Math.floor(((event.clientY - bounds.top) / bounds.height) * GRID_ROWS),
+      0,
+      GRID_ROWS - 1
+    );
+    let latest: TileLayout = { x: originX, y: originY, w: 4, h: 3 };
+    setDraftLayout(latest);
+
+    const move = (pointer: PointerEvent): void => {
+      const currentX = clamp(
+        Math.ceil(((pointer.clientX - bounds.left) / bounds.width) * GRID_COLUMNS),
+        originX + 1,
+        GRID_COLUMNS
       );
-      const otherMemory = splitCapacity(
-        workspacePool.memory_capacity_mib - requestedMemory,
-        otherIds.length,
-        MIN_WORKER_MEMORY_MIB
+      const currentY = clamp(
+        Math.ceil(((pointer.clientY - bounds.top) / bounds.height) * GRID_ROWS),
+        originY + 1,
+        GRID_ROWS
       );
-      const plan: PlannedWorker[] = ids.map((id) => {
-        const slot = snapshot.slots.find((candidate) => candidate.id === id);
-        if (id === slotId) {
-          return {
-            id,
-            allocation: {
-              cpu_threads: requestedCpu,
-              memory_mib: requestedMemory,
-              gpu: slot?.allocation.gpu ?? "none"
-            }
-          };
-        }
-        const index = otherIds.indexOf(id);
-        return {
-          id,
-          allocation: {
-            cpu_threads: otherCpu[index],
-            memory_mib: otherMemory[index],
-            gpu: slot?.allocation.gpu ?? "none"
-          }
-        };
-      });
-      return executePlan(snapshot, plan);
-    });
-  }, [snapshot, workspacePool, busy, activeWorkers, run, executePlan]);
+      latest = {
+        x: originX,
+        y: originY,
+        w: clamp(currentX - originX, 4, WORKER_MAX_WIDTH),
+        h: clamp(currentY - originY, 3, WORKER_MAX_HEIGHT)
+      };
+      setDraftLayout(latest);
+    };
+
+    const end = (): void => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      setDraftLayout(null);
+      addWorker(latest);
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end, { once: true });
+  }, [canAdd, busy, addWorker]);
 
   const cycleGpu = useCallback((worker: SlotSummary) => {
     if (!snapshot || busy || snapshot.mode !== "remote") return;
@@ -465,10 +550,6 @@ function App(): React.JSX.Element {
   const activeSlots = [...persistent, ...activeWorkers];
   const totalCpu = persistentPool.cpu_capacity_threads + workspacePool.cpu_capacity_threads;
   const totalMemory = persistentPool.memory_capacity_mib + workspacePool.memory_capacity_mib;
-  const canAdd = workers.some((worker) => !isActive(worker))
-    && snapshot.mode !== "local_exclusive"
-    && snapshot.mode !== "maintenance";
-
   return (
     <div className={`app-shell ${busy ? "busy" : ""}`}>
       <header className="topbar">
@@ -499,7 +580,7 @@ function App(): React.JSX.Element {
             <strong>{activeWorkers.length} worker{activeWorkers.length === 1 ? "" : "s"}</strong>
             <span>Drag to arrange. Resize a corner to redistribute the W pool.</span>
           </div>
-          <button type="button" className="add-worker" disabled={!canAdd || busy} onClick={addWorker}>
+          <button type="button" className="add-worker" disabled={!canAdd || busy} onClick={() => addWorker()}>
             <span>＋</span> Worker
           </button>
         </div>
@@ -509,9 +590,24 @@ function App(): React.JSX.Element {
         <section
           className="bento-board"
           ref={boardRef}
-          onDoubleClick={() => { if (canAdd) addWorker(); }}
+          onPointerDown={startCreateGesture}
           aria-label="Managed capacity bento board"
         >
+          {draftLayout && (
+            <div
+              className="draft-tile"
+              style={{
+                left: `${(draftLayout.x / GRID_COLUMNS) * 100}%`,
+                top: `${(draftLayout.y / GRID_ROWS) * 100}%`,
+                width: `${(draftLayout.w / GRID_COLUMNS) * 100}%`,
+                height: `${(draftLayout.h / GRID_ROWS) * 100}%`
+              }}
+            >
+              <strong>New worker</strong>
+              <small>Release to fit</small>
+            </div>
+          )}
+
           {activeSlots.map((slot) => {
             const layout = layouts[slot.id];
             if (!layout) return null;
@@ -588,10 +684,10 @@ function App(): React.JSX.Element {
           })}
 
           {activeWorkers.length === 0 && (
-            <button type="button" className="empty-board" disabled={!canAdd} onClick={addWorker}>
+            <button type="button" className="empty-board" disabled={!canAdd} onPointerDown={(event) => event.stopPropagation()} onClick={() => addWorker()}>
               <span>＋</span>
               <strong>Create a worker block</strong>
-              <small>It will automatically use the available W capacity.</small>
+              <small>Click here or drag anywhere on the canvas.</small>
             </button>
           )}
         </section>
