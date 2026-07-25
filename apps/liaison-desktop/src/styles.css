@@ -141,7 +141,23 @@ button { font: inherit; }
   background-size: calc(100% / 24) calc(100% / 16);
   user-select: none;
   touch-action: none;
+  cursor: crosshair;
 }
+
+.draft-tile {
+  position: absolute;
+  z-index: 5;
+  display: grid;
+  place-content: center;
+  gap: 4px;
+  border: 2px solid var(--blue);
+  border-radius: 18px;
+  color: var(--blue);
+  background: rgba(0, 102, 204, .08);
+  pointer-events: none;
+}
+.draft-tile strong { font-size: 14px; font-weight: 600; }
+.draft-tile small { font-size: 10px; text-align: center; }
 
 .bento-tile {
   position: absolute;
