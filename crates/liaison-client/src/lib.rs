@@ -51,7 +51,7 @@ impl LiaisonClient {
         stream.write_all(&payload)?;
         stream.flush()?;
 
-        let mut reader = BufReader::new(stream);
+        let reader = BufReader::new(stream);
         let mut line = String::new();
         let read = reader.take(MAX_MESSAGE_BYTES as u64).read_line(&mut line)?;
         if read == 0 {
