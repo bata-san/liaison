@@ -6,8 +6,9 @@ on:
   pull_request:
 
 jobs:
-  validate:
+  windows-validation:
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -23,9 +24,26 @@ jobs:
         working-directory: apps/liaison-desktop
         run: npm install
 
-      - name: Check Rust workspace
-        run: cargo check --workspace
-
       - name: Build frontend
         working-directory: apps/liaison-desktop
         run: npm run build
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Build Windows binaries
+        run: cargo build -p liaison-service -p liaison-cli -p liaison-desktop
+
+      - name: Run end-to-end smoke test
+        shell: powershell
+        run: .\scripts\smoke-test.ps1 -SkipBuild
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: liaison-windows-debug
+          path: |
+            target/debug/liaison-service.exe
+            target/debug/liaison-cli.exe
+            target/debug/liaison-desktop.exe
+          if-no-files-found: error

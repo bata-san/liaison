@@ -1,51 +1,81 @@
 # Liaison
 
-Liaison is a lightweight workstation orchestrator for a school-owned Windows 11 Pro workstation.
-It keeps the host usable as a normal Windows PC while exposing persistent and workspace resource pools to approved remote users over Tailscale.
+Liaison is a lightweight, rich workstation orchestrator for a school-owned Windows 11 Pro workstation.
+It keeps Windows native for classroom use while splitting a shared remote resource pool into two persistent slots and up to five workspace slots.
 
-## Design goals
+## What is implemented
 
-- Keep the Windows host native for classroom use.
-- Keep the always-on footprint small.
-- Split one workspace pool into 3–5 disposable slots on demand.
-- Keep two persistent service slots alive across classroom mode changes.
-- Reserve GPU access instead of pretending one GPU can always be divided evenly.
-- Provide a rich local dashboard without shipping an Electron runtime.
+- Rust Windows service with a loopback-only, token-authenticated control protocol.
+- Dynamic CPU and RAM distribution across 0–5 workspace slots.
+- Two protected persistent slots.
+- Remote, Class, Local-exclusive, and Maintenance modes.
+- Exclusive/shared GPU reservation policy.
+- Safe mock runtime for GUI and workflow testing without touching WSL or Docker.
+- WSL Docker runtime adapter for the real host.
+- Tauri 2 desktop dashboard using the Windows WebView2 runtime.
+- Rust CLI for diagnostics and automation.
+- Windows smoke tests covering the complete control flow.
 
-## Technology
+## Why this stays lightweight
 
-- **Rust** for the Windows service, orchestration logic, and native commands.
-- **Tauri 2** for the desktop shell.
-- **Vanilla TypeScript and CSS** for a rich UI with minimal frontend overhead.
-- **Windows WebView2** supplied by the operating system.
-- **WSL/container runtime adapters** behind a stable Rust interface.
+- The always-on service is Rust and uses the standard TCP stack rather than an embedded web server.
+- Runtime state is persisted as JSON; there is no database daemon.
+- The GUI uses Tauri/WebView2 rather than shipping a Chromium/Electron process tree.
+- The frontend is vanilla TypeScript and CSS with no UI framework.
+- The GUI may be closed while the service continues to run.
 
-## Repository layout
+## Safe demo
 
-```text
-apps/
-  liaison-service/        Windows background service
-  liaison-desktop/        Tauri desktop dashboard
-crates/
-  liaison-core/           Shared domain models and policies
-docs/
-  ARCHITECTURE.md         System architecture
-scripts/
-  install-service.ps1     Initial local service installation
+The mock runtime does not start WSL, Docker, containers, or GPU workloads.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run-demo.ps1
 ```
 
-## Development
+For a terminal-only demonstration:
 
-Prerequisites on Windows:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run-demo.ps1 -NoGui
+```
 
-- Rust stable with the MSVC target
+## Automated test
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\test-all.ps1
+```
+
+The end-to-end smoke test verifies service startup, a five-way workspace split, GPU reservation, Class throttling, and Local-exclusive protection of P1/P2.
+
+## Development prerequisites
+
+- Windows 11 Pro
+- Rust stable with the MSVC toolchain
 - Microsoft C++ Build Tools
-- Microsoft Edge WebView2
-- Node.js for frontend build tooling only
+- Node.js 22 or newer
+- Microsoft Edge WebView2 Runtime
 
 ```powershell
 npm --prefix apps/liaison-desktop install
-npm --prefix apps/liaison-desktop run tauri dev
+cargo test --workspace
+npm --prefix apps/liaison-desktop run build
 ```
 
-The current dashboard uses an in-process demo state. The next milestone connects it to the Windows service through a restricted local IPC protocol.
+## Runtime modes
+
+### Mock
+
+Use for development, GUI review, tests, and CI. No workstation resources are changed.
+
+### WSL Docker
+
+Uses `wsl.exe -d LiaisonRuntime -- docker ...`. The adapter creates one container per slot, applies CPU/RAM limits, stores each workspace in a named volume, and recreates a container when GPU access changes.
+
+## Security boundary
+
+- The service listens only on `127.0.0.1` or `::1`.
+- Every request requires a local token of at least 16 characters.
+- The desktop and CLI send structured commands, never arbitrary PowerShell.
+- Workspace containers do not receive the Docker socket or Windows administrator access.
+- Tailscale remains the external network boundary.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/TESTING.md](docs/TESTING.md).

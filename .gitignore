@@ -5,3 +5,5 @@
 .DS_Store
 *.log
 .env
+liaison.local.json
+runtime-data/

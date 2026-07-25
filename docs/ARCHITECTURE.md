@@ -1,49 +1,47 @@
 # Liaison architecture
 
-## Runtime shape
-
-Liaison deliberately separates the privileged always-on process from the rich user interface.
+## Process model
 
 ```text
 Windows 11 Pro
-├─ LiaisonService.exe      Rust Windows service, no GUI
-├─ Liaison.exe             Tauri/WebView2 dashboard, opened on demand
-├─ Tailscale               Private transport
-└─ Runtime adapter
-   ├─ Persistent pool      P1–P2
-   └─ Workspace pool       W1–W5
+├─ LiaisonService.exe                 always on, Rust
+│  ├─ loopback JSON control protocol
+│  ├─ scheduler and policy engine
+│  ├─ host/Tailscale/GPU metrics
+│  └─ runtime adapter
+├─ Liaison desktop                    optional, Tauri/WebView2
+├─ liaison-cli.exe                    optional diagnostics
+└─ WSL distribution                   only in real runtime mode
+   └─ Docker
+      ├─ P1 / P2                      persistent
+      └─ W1 ... W5                    workspace
 ```
 
-The GUI can be closed without affecting workloads. The service owns privileged operations and exposes only a narrow local IPC contract.
+The service is the only privileged control component. The GUI is replaceable and may be closed.
 
-## Lightweight policy
+## Local protocol
 
-- No Electron or bundled Chromium.
-- No frontend framework in the first release.
-- No always-on Node.js process.
-- No external database in the first release.
-- Append-only structured logs and small configuration files are preferred.
-- Runtime integrations are loaded only when required.
-- Slot metrics are sampled at a low rate while the dashboard is closed.
+The service accepts one newline-delimited JSON request per TCP connection on a loopback address. The protocol is versioned and limited to 64 KiB per message. It exposes only structured health, snapshot, mode, slot, rebalance, and GPU operations.
 
-## Rich UI policy
+## Dynamic resource split
 
-Visual richness comes from CSS, native WebView rendering, small SVG elements, and carefully limited animation. It does not require a large JavaScript framework.
+A pool has a fixed capacity; active slots receive an even split including any remainder. For 38 threads: one slot gets 38, two get 19 each, three get 13/13/12, and five get 8/8/8/7/7.
 
-## Security boundary
+## Operating modes
 
-The desktop app is unprivileged. The Windows service validates every state-changing request. Future IPC must use Windows named pipes with an explicit ACL rather than an open TCP listener.
-
-The service must never expose a generic command execution endpoint. Each allowed operation is represented by a typed command such as `SetMode`, `StartSlot`, `StopSlot`, or `ResizePool`.
+- **Remote:** full workspace pool and GPU reservations allowed.
+- **Class:** active workspaces remain alive using the smaller class pool.
+- **Local-exclusive:** all workspace slots stop; P1 and P2 continue.
+- **Maintenance:** all managed slots stop.
 
 ## Runtime abstraction
 
-The shared Rust model will be extended with a `RuntimeAdapter` trait. Initial implementations may call a WSL/Docker-compatible backend. A future WSL Containers backend can be added without changing the desktop UI.
+`RuntimeAdapter` isolates policy from execution. `MockRuntime` is safe and deterministic. `WslDockerRuntime` invokes Docker inside the configured WSL distribution.
 
-## Resource model
+## Persistence
 
-- Persistent pool: two logical slots, always available, low guaranteed footprint.
-- Workspace pool: three to five logical slots, dynamically divided according to active demand.
-- GPU: explicit reservation, not automatic equal partitioning.
-- Classroom mode: lowers workspace priority while preserving persistent slots.
-- Local-exclusive mode: drains workspace slots before returning GPU and memory capacity to Windows.
+Configuration and the latest state snapshot are JSON files. Container data lives in named volumes. No database process is required.
+
+## GPU behavior
+
+GPU access is a reservation, not perfect hardware partitioning. For WSL Docker, changing access recreates the affected container because Docker cannot add a GPU device to an already-created container.

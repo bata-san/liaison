@@ -1,31 +1,45 @@
-#requires -RunAsAdministrator
+param(
+    [string]$InstallDirectory = "$env:ProgramFiles\Liaison",
+    [string]$ConfigDirectory = "$env:ProgramData\Liaison"
+)
+
 $ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent $PSScriptRoot
+$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
+if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Run this script from an elevated PowerShell window."
+}
 
-$repositoryRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-Push-Location $repositoryRoot
+Push-Location $Root
 try {
-    cargo build --release -p liaison-service
-    $binary = Join-Path $repositoryRoot "target\release\liaison-service.exe"
+    cargo build --release -p liaison-service -p liaison-cli
+    if ($LASTEXITCODE -ne 0) { throw "Release build failed" }
 
-    $existing = Get-Service -Name "LiaisonService" -ErrorAction SilentlyContinue
-    if ($existing) {
-        if ($existing.Status -ne "Stopped") {
-            Stop-Service -Name "LiaisonService" -Force
-        }
-        sc.exe delete LiaisonService | Out-Null
-        Start-Sleep -Milliseconds 500
+    New-Item -ItemType Directory -Force -Path $InstallDirectory, $ConfigDirectory | Out-Null
+    Copy-Item "target\release\liaison-service.exe" $InstallDirectory -Force
+    Copy-Item "target\release\liaison-cli.exe" $InstallDirectory -Force
+
+    $ConfigPath = Join-Path $ConfigDirectory "liaison.json"
+    if (-not (Test-Path $ConfigPath)) {
+        Copy-Item "config\liaison.example.json" $ConfigPath
+        Write-Warning "Edit $ConfigPath and replace auth_token before starting the service."
     }
 
-    New-Service `
-        -Name "LiaisonService" `
-        -BinaryPathName ('"{0}"' -f $binary) `
-        -DisplayName "Liaison Workstation Service" `
-        -Description "Controls Liaison resource pools and workstation operating modes." `
-        -StartupType Automatic
+    $Existing = Get-Service -Name "LiaisonService" -ErrorAction SilentlyContinue
+    if ($Existing) {
+        Stop-Service -Name "LiaisonService" -Force -ErrorAction SilentlyContinue
+        sc.exe delete LiaisonService | Out-Null
+        Start-Sleep -Seconds 1
+    }
 
-    Start-Service -Name "LiaisonService"
-    Write-Host "LiaisonService installed and started."
-}
-finally {
+    $Binary = Join-Path $InstallDirectory "liaison-service.exe"
+    sc.exe create LiaisonService binPath= "`"$Binary`"" start= auto DisplayName= "Liaison Workstation Service" | Out-Null
+    sc.exe description LiaisonService "Controls Liaison resource pools and local workstation modes." | Out-Null
+    sc.exe failure LiaisonService reset= 86400 actions= restart/5000/restart/15000/""/0 | Out-Null
+
+    Write-Host "Installed LiaisonService." -ForegroundColor Green
+    Write-Host "After editing the token, run: Start-Service LiaisonService"
+} finally {
     Pop-Location
 }
