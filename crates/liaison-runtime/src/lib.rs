@@ -15,8 +15,16 @@ pub trait RuntimeAdapter: Send + Sync {
     fn kind(&self) -> RuntimeKind;
     fn start_slot(&self, slot: &SlotSummary) -> Result<(), RuntimeError>;
     fn stop_slot(&self, slot_id: &str) -> Result<(), RuntimeError>;
-    fn resize_slot(&self, slot_id: &str, allocation: &ResourceAllocation) -> Result<(), RuntimeError>;
-    fn set_gpu_access(&self, slot: &SlotSummary, access: GpuAccess) -> Result<(), RuntimeError>;
+    fn resize_slot(
+        &self,
+        slot_id: &str,
+        allocation: &ResourceAllocation,
+    ) -> Result<(), RuntimeError>;
+    fn set_gpu_access(
+        &self,
+        slot: &SlotSummary,
+        access: GpuAccess,
+    ) -> Result<(), RuntimeError>;
     fn collect_host_metrics(&self) -> HostMetrics;
     fn collect_gpu_metrics(&self) -> GpuMetrics;
     fn tailscale_online(&self) -> bool;
@@ -25,7 +33,6 @@ pub trait RuntimeAdapter: Send + Sync {
 #[derive(Debug, Default)]
 pub struct MockRuntime {
     slots: Mutex<HashMap<String, ResourceAllocation>>,
-    gpu_owner: Mutex<Option<String>>,
 }
 
 impl MockRuntime {
@@ -43,7 +50,7 @@ impl RuntimeAdapter for MockRuntime {
         self.slots
             .lock()
             .map_err(|_| RuntimeError::State("mock runtime lock poisoned".to_owned()))?
-            .insert(slot.id.clone(), slot.allocation.clone());
+            .insert(slot.id.clone(), slot.allocation);
         Ok(())
     }
 
@@ -52,46 +59,39 @@ impl RuntimeAdapter for MockRuntime {
             .lock()
             .map_err(|_| RuntimeError::State("mock runtime lock poisoned".to_owned()))?
             .remove(slot_id);
-        let mut gpu_owner = self.gpu_owner
-            .lock()
-            .map_err(|_| RuntimeError::State("mock GPU lock poisoned".to_owned()))?;
-        if gpu_owner.as_deref() == Some(slot_id) {
-            *gpu_owner = None;
-        }
         Ok(())
     }
 
-    fn resize_slot(&self, slot_id: &str, allocation: &ResourceAllocation) -> Result<(), RuntimeError> {
-        let mut slots = self.slots
+    fn resize_slot(
+        &self,
+        slot_id: &str,
+        allocation: &ResourceAllocation,
+    ) -> Result<(), RuntimeError> {
+        let mut slots = self
+            .slots
             .lock()
             .map_err(|_| RuntimeError::State("mock runtime lock poisoned".to_owned()))?;
         if !slots.contains_key(slot_id) {
             return Err(RuntimeError::NotFound(slot_id.to_owned()));
         }
-        slots.insert(slot_id.to_owned(), allocation.clone());
+        slots.insert(slot_id.to_owned(), *allocation);
         Ok(())
     }
 
-    fn set_gpu_access(&self, slot: &SlotSummary, access: GpuAccess) -> Result<(), RuntimeError> {
-        let slot_id = &slot.id;
-        let slots = self.slots
+    fn set_gpu_access(
+        &self,
+        slot: &SlotSummary,
+        access: GpuAccess,
+    ) -> Result<(), RuntimeError> {
+        let mut slots = self
+            .slots
             .lock()
             .map_err(|_| RuntimeError::State("mock runtime lock poisoned".to_owned()))?;
-        if !slots.contains_key(slot_id) {
-            return Err(RuntimeError::NotFound(slot_id.to_owned()));
-        }
-        drop(slots);
-        let mut owner = self.gpu_owner
-            .lock()
-            .map_err(|_| RuntimeError::State("mock GPU lock poisoned".to_owned()))?;
-        match access {
-            GpuAccess::None => {
-                if owner.as_deref() == Some(slot_id.as_str()) {
-                    *owner = None;
-                }
-            }
-            GpuAccess::Shared | GpuAccess::Exclusive => *owner = Some(slot_id.to_owned()),
-        }
+        let allocation = slots
+            .get_mut(&slot.id)
+            .ok_or_else(|| RuntimeError::NotFound(slot.id.clone()))?;
+        *allocation = slot.allocation;
+        allocation.gpu = access;
         Ok(())
     }
 
@@ -109,12 +109,22 @@ impl RuntimeAdapter for MockRuntime {
     }
 
     fn collect_gpu_metrics(&self) -> GpuMetrics {
-        let owner = self.gpu_owner.lock().ok().and_then(|owner| owner.clone());
+        let slots = self.slots.lock().ok();
+        let exclusive_owner = slots.as_ref().and_then(|slots| {
+            slots.iter().find_map(|(slot_id, allocation)| {
+                (allocation.gpu == GpuAccess::Exclusive).then(|| slot_id.clone())
+            })
+        });
+        let gpu_active = slots.as_ref().is_some_and(|slots| {
+            slots
+                .values()
+                .any(|allocation| allocation.gpu != GpuAccess::None)
+        });
         GpuMetrics {
-            utilization_percent: if owner.is_some() { 47.0 } else { 2.0 },
-            memory_used_mib: if owner.is_some() { 12_288 } else { 768 },
+            utilization_percent: if gpu_active { 47.0 } else { 2.0 },
+            memory_used_mib: if gpu_active { 12_288 } else { 768 },
             memory_total_mib: 49_152,
-            reserved_by: owner,
+            reserved_by: exclusive_owner,
             available: true,
         }
     }
@@ -184,7 +194,8 @@ impl WslDockerRuntime {
             "container".to_owned(),
             "inspect".to_owned(),
             Self::container_name(slot_id),
-        ]).is_ok()
+        ])
+        .is_ok()
     }
 }
 
@@ -207,7 +218,12 @@ impl RuntimeAdapter for WslDockerRuntime {
             "--name".to_owned(),
             name,
             "--restart".to_owned(),
-            if slot.kind == SlotKind::Persistent { "unless-stopped" } else { "no" }.to_owned(),
+            if slot.kind == SlotKind::Persistent {
+                "unless-stopped"
+            } else {
+                "no"
+            }
+            .to_owned(),
             "--cpus".to_owned(),
             slot.allocation.cpu_threads.to_string(),
             "--memory".to_owned(),
@@ -243,7 +259,11 @@ impl RuntimeAdapter for WslDockerRuntime {
         Ok(())
     }
 
-    fn resize_slot(&self, slot_id: &str, allocation: &ResourceAllocation) -> Result<(), RuntimeError> {
+    fn resize_slot(
+        &self,
+        slot_id: &str,
+        allocation: &ResourceAllocation,
+    ) -> Result<(), RuntimeError> {
         if !self.exists(slot_id) {
             return Err(RuntimeError::NotFound(slot_id.to_owned()));
         }
@@ -258,10 +278,19 @@ impl RuntimeAdapter for WslDockerRuntime {
         Ok(())
     }
 
-    fn set_gpu_access(&self, slot: &SlotSummary, access: GpuAccess) -> Result<(), RuntimeError> {
+    fn set_gpu_access(
+        &self,
+        slot: &SlotSummary,
+        access: GpuAccess,
+    ) -> Result<(), RuntimeError> {
         let name = Self::container_name(&slot.id);
         if self.exists(&slot.id) {
-            let _ = self.docker(vec!["stop".to_owned(), "--time".to_owned(), "20".to_owned(), name.clone()]);
+            let _ = self.docker(vec![
+                "stop".to_owned(),
+                "--time".to_owned(),
+                "20".to_owned(),
+                name.clone(),
+            ]);
             self.docker(vec!["rm".to_owned(), name])?;
         }
         let mut updated = slot.clone();
@@ -286,12 +315,20 @@ impl RuntimeAdapter for WslDockerRuntime {
                 "--format=csv,noheader,nounits",
             ])
             .output();
-        let Ok(output) = output else { return GpuMetrics::default(); };
+        let Ok(output) = output else {
+            return GpuMetrics::default();
+        };
         if !output.status.success() {
             return GpuMetrics::default();
         }
         let text = String::from_utf8_lossy(&output.stdout);
-        let values: Vec<_> = text.lines().next().unwrap_or_default().split(',').map(str::trim).collect();
+        let values: Vec<_> = text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .collect();
         if values.len() != 3 {
             return GpuMetrics::default();
         }
@@ -341,7 +378,11 @@ mod tests {
             kind: SlotKind::Workspace,
             status: SlotStatus::Running,
             owner: None,
-            allocation: ResourceAllocation { cpu_threads: 8, memory_mib: 8_192, gpu: GpuAccess::None },
+            allocation: ResourceAllocation {
+                cpu_threads: 8,
+                memory_mib: 8_192,
+                gpu: GpuAccess::None,
+            },
             cpu_percent: 0.0,
             memory_used_mib: 0,
             endpoint: None,
@@ -350,13 +391,41 @@ mod tests {
     }
 
     #[test]
-    fn mock_runtime_tracks_slot_lifecycle() {
+    fn mock_runtime_tracks_slot_lifecycle_and_shared_gpu() {
         let runtime = MockRuntime::new();
         runtime.start_slot(&slot("W1")).unwrap();
-        runtime.resize_slot("W1", &ResourceAllocation { cpu_threads: 4, memory_mib: 4_096, gpu: GpuAccess::None }).unwrap();
-        runtime.set_gpu_access(&slot("W1"), GpuAccess::Exclusive).unwrap();
-        assert_eq!(runtime.collect_gpu_metrics().reserved_by.as_deref(), Some("W1"));
+        runtime.start_slot(&slot("W2")).unwrap();
+        runtime
+            .resize_slot(
+                "W1",
+                &ResourceAllocation {
+                    cpu_threads: 4,
+                    memory_mib: 4_096,
+                    gpu: GpuAccess::None,
+                },
+            )
+            .unwrap();
+
+        let mut w1 = slot("W1");
+        w1.allocation.gpu = GpuAccess::Shared;
+        runtime.set_gpu_access(&w1, GpuAccess::Shared).unwrap();
+        let mut w2 = slot("W2");
+        w2.allocation.gpu = GpuAccess::Shared;
+        runtime.set_gpu_access(&w2, GpuAccess::Shared).unwrap();
+        assert!(runtime.collect_gpu_metrics().reserved_by.is_none());
+        assert_eq!(runtime.collect_gpu_metrics().utilization_percent, 47.0);
+
+        w1.allocation.gpu = GpuAccess::Exclusive;
+        runtime
+            .set_gpu_access(&w1, GpuAccess::Exclusive)
+            .unwrap();
+        assert_eq!(
+            runtime.collect_gpu_metrics().reserved_by.as_deref(),
+            Some("W1")
+        );
         runtime.stop_slot("W1").unwrap();
-        assert!(runtime.resize_slot("W1", &ResourceAllocation::stopped()).is_err());
+        assert!(runtime
+            .resize_slot("W1", &ResourceAllocation::stopped())
+            .is_err());
     }
 }
