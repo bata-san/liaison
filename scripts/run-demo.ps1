@@ -78,6 +78,10 @@ try {
         if (-not $Ready) { throw "Demo service did not become ready" }
 
         & $CliExe rebalance 3 | Out-Null
+        foreach ($slot in @("W1", "W2", "W3")) {
+            & $CliExe gpu $slot shared | Out-Null
+        }
+
         Write-Host "Liaison demo service is running." -ForegroundColor Green
         Write-Host "Address: $env:LIAISON_ADDRESS"
         Write-Host "Runtime: mock (safe; WSL and Docker are not touched)"
@@ -87,7 +91,11 @@ try {
         } else {
             Push-Location (Join-Path $Root "apps\liaison-desktop")
             try {
-                if (-not (Test-Path "node_modules")) { npm install }
+                # Always reconcile dependencies. This is fast when node_modules is current
+                # and ensures newly added UI packages are installed on existing checkouts.
+                npm install --no-audit --no-fund
+                if ($LASTEXITCODE -ne 0) { throw "Frontend dependency installation failed" }
+
                 npm run tauri:dev
                 if ($LASTEXITCODE -ne 0) { throw "Tauri development host failed" }
             } finally {
