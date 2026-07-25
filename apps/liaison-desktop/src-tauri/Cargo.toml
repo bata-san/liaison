@@ -1,0 +1,15 @@
+[package]
+name = "liaison-desktop"
+version = "0.1.0"
+description = "Liaison workstation dashboard"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+liaison-core = { path = "../../../crates/liaison-core" }
+serde.workspace = true
+tauri = { version = "2", features = [] }
