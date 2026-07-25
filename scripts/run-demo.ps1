@@ -10,7 +10,7 @@ $Config = Join-Path $DemoDir "liaison.demo.json"
 $Token = "liaison-demo-token-2026"
 New-Item -ItemType Directory -Force -Path $DemoDir | Out-Null
 
-@{
+$ConfigJson = @{
     listen_address = "127.0.0.1:57841"
     auth_token = $Token
     runtime = "mock"
@@ -24,7 +24,8 @@ New-Item -ItemType Directory -Force -Path $DemoDir | Out-Null
     max_workspace_slots = 5
     persistent_autostart = $true
     metrics_interval_ms = 1000
-} | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $Config
+} | ConvertTo-Json -Depth 5
+[System.IO.File]::WriteAllText($Config, $ConfigJson, [System.Text.UTF8Encoding]::new($false))
 
 Push-Location $Root
 try {
