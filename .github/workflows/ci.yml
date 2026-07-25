@@ -29,7 +29,28 @@ jobs:
         run: npm run build
 
       - name: Run Rust tests
-        run: cargo test --workspace
+        id: rust_tests
+        shell: powershell
+        continue-on-error: true
+        run: |
+          cargo test --workspace *> cargo-test.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content cargo-test.log -Tail 160
+            exit 1
+          }
+
+      - name: Upload Rust diagnostics
+        if: steps.rust_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-test-diagnostics
+          path: cargo-test.log
+          if-no-files-found: error
+
+      - name: Fail after Rust test diagnostics
+        if: steps.rust_tests.outcome == 'failure'
+        shell: powershell
+        run: exit 1
 
       - name: Build Windows binaries
         run: cargo build -p liaison-service -p liaison-cli -p liaison-desktop
