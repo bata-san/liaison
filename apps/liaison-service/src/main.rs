@@ -3,20 +3,20 @@ mod server;
 
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::AtomicBool,
-        Arc,
-    },
+    sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
 
 use app::ServiceApp;
-use liaison_core::{AppConfig, RuntimeKind};
+use liaison_core::{detected_cpu_threads, AppConfig, RuntimeKind};
 use liaison_runtime::{MockRuntime, RuntimeAdapter, WslDockerRuntime};
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("liaison=info".parse().unwrap()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("liaison=info".parse().unwrap()),
+        )
         .with_target(false)
         .compact()
         .init();
@@ -30,7 +30,11 @@ fn main() {
     };
 
     if options.print_default_config {
-        println!("{}", serde_json::to_string_pretty(&AppConfig::default()).expect("default config is serializable"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&AppConfig::default())
+                .expect("default config is serializable")
+        );
         return;
     }
 
@@ -58,7 +62,10 @@ fn run_console(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     run_with_config(config, shutdown)
 }
 
-fn run_with_config(config: AppConfig, shutdown: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_with_config(
+    mut config: AppConfig,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
     config.validate()?;
     let runtime: Arc<dyn RuntimeAdapter> = match config.runtime {
         RuntimeKind::Mock => Arc::new(MockRuntime::new()),
@@ -68,6 +75,24 @@ fn run_with_config(config: AppConfig, shutdown: Arc<AtomicBool>) -> Result<(), B
             config.persistent_image.clone(),
         )),
     };
+
+    if config.auto_tune {
+        let host = runtime.collect_host_metrics();
+        let host_cpu_threads = detected_cpu_threads();
+        config.tune_for_host(host_cpu_threads, host.memory_total_mib);
+        config.validate()?;
+        tracing::info!(
+            host_cpu_threads,
+            host_memory_mib = host.memory_total_mib,
+            persistent_cpu = config.persistent_pool.cpu_threads,
+            persistent_memory_mib = config.persistent_pool.memory_mib,
+            workspace_cpu = config.workspace_pool.cpu_threads,
+            workspace_memory_mib = config.workspace_pool.memory_mib,
+            max_workspace_slots = config.max_workspace_slots,
+            "auto-tuned resource pools for detected host"
+        );
+    }
+
     let app = Arc::new(ServiceApp::new(config.clone(), runtime)?);
     let interval = Duration::from_millis(config.metrics_interval_ms.max(250));
     server::run(
@@ -103,7 +128,9 @@ impl Options {
                     config_path = PathBuf::from(path);
                 }
                 "--runtime" => {
-                    let runtime = arguments.next().ok_or("--runtime requires mock or wsl-docker")?;
+                    let runtime = arguments
+                        .next()
+                        .ok_or("--runtime requires mock or wsl-docker")?;
                     runtime_override = Some(match runtime.as_str() {
                         "mock" => RuntimeKind::Mock,
                         "wsl-docker" => RuntimeKind::WslDocker,
@@ -120,7 +147,12 @@ impl Options {
                 value => return Err(format!("unknown argument: {value}")),
             }
         }
-        Ok(Self { console, config_path, runtime_override, print_default_config })
+        Ok(Self {
+            console,
+            config_path,
+            runtime_override,
+            print_default_config,
+        })
     }
 }
 
@@ -130,8 +162,11 @@ fn default_config_path() -> PathBuf {
     }
     #[cfg(windows)]
     {
-        let program_data = std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".to_owned());
-        return PathBuf::from(program_data).join("Liaison").join("liaison.json");
+        let program_data =
+            std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".to_owned());
+        return PathBuf::from(program_data)
+            .join("Liaison")
+            .join("liaison.json");
     }
     #[cfg(not(windows))]
     {
@@ -177,13 +212,15 @@ mod windows_host {
     fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let handler_shutdown = Arc::clone(&shutdown);
-        let status_handle = service_control_handler::register(SERVICE_NAME, move |event| match event {
-            ServiceControl::Stop => {
-                handler_shutdown.store(true, Ordering::Relaxed);
-                ServiceControlHandlerResult::NoError
+        let status_handle = service_control_handler::register(SERVICE_NAME, move |event| {
+            match event {
+                ServiceControl::Stop => {
+                    handler_shutdown.store(true, Ordering::Relaxed);
+                    ServiceControlHandlerResult::NoError
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
             }
-            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            _ => ServiceControlHandlerResult::NotImplemented,
         })?;
 
         status_handle.set_service_status(ServiceStatus {
