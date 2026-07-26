@@ -15,6 +15,7 @@ $ErrorActionPreference = "Stop"
 $TaskName = "LiaisonServer"
 $FirewallRuleName = "Liaison Server (Tailscale)"
 $Root = Split-Path -Parent $PSScriptRoot
+$PackagedBin = Join-Path $Root "bin"
 
 function Write-Step([string]$Message) {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
@@ -72,8 +73,6 @@ if (-not (Test-Administrator)) {
 }
 
 Write-Step "前提条件を確認"
-Require-Command "cargo.exe" "Rustをインストールしてください: https://rustup.rs"
-
 $SelectedDistribution = $WslDistribution
 if ($Runtime -eq "wsl-docker") {
     Require-Command "wsl.exe" "Windowsの『Linux用Windowsサブシステム』を有効にしてください。"
@@ -95,20 +94,31 @@ if ($Runtime -eq "wsl-docker") {
     Write-Host "WSL: $SelectedDistribution / Docker: OK" -ForegroundColor Green
 }
 
-Write-Step "サーバーをビルド"
 Push-Location $Root
 try {
-    if (-not $SkipBuild) {
-        cargo build --release -p liaison-service -p liaison-cli
-        if ($LASTEXITCODE -ne 0) {
-            throw "サーバーのReleaseビルドに失敗しました。"
+    $PackagedServer = Join-Path $PackagedBin "liaison-service.exe"
+    $PackagedCli = Join-Path $PackagedBin "liaison-cli.exe"
+    $UsePackagedBinaries = (Test-Path $PackagedServer) -and (Test-Path $PackagedCli)
+
+    if ($UsePackagedBinaries) {
+        Write-Step "配布済みサーバーを使用"
+        $SourceServer = $PackagedServer
+        $SourceCli = $PackagedCli
+    } else {
+        Write-Step "サーバーをビルド"
+        Require-Command "cargo.exe" "Rustをインストールしてください: https://rustup.rs"
+        if (-not $SkipBuild) {
+            cargo build --release -p liaison-service -p liaison-cli
+            if ($LASTEXITCODE -ne 0) {
+                throw "サーバーのReleaseビルドに失敗しました。"
+            }
         }
+        $SourceServer = Join-Path $Root "target\release\liaison-service.exe"
+        $SourceCli = Join-Path $Root "target\release\liaison-cli.exe"
     }
 
-    $SourceServer = Join-Path $Root "target\release\liaison-service.exe"
-    $SourceCli = Join-Path $Root "target\release\liaison-cli.exe"
     if (-not (Test-Path $SourceServer) -or -not (Test-Path $SourceCli)) {
-        throw "Releaseバイナリがありません。-SkipBuildを外して実行してください。"
+        throw "サーバーバイナリがありません。配布ZIPを使うか、-SkipBuildを外して実行してください。"
     }
 
     Write-Step "既存サーバーを停止"
@@ -132,6 +142,9 @@ try {
 
     $ConfigPath = Join-Path $ConfigDirectory "liaison.json"
     $ExamplePath = Join-Path $Root "config\liaison.example.json"
+    if (-not (Test-Path $ExamplePath)) {
+        throw "設定テンプレートがありません: $ExamplePath"
+    }
     $Config = Get-Content $ExamplePath -Raw | ConvertFrom-Json
 
     $Token = $null
@@ -253,8 +266,7 @@ try {
     Write-Host "`nセットアップ完了" -ForegroundColor Green
     Write-Host "サーバー: $ClientAddress"
     Write-Host "接続ファイル: $ConnectionFile"
-    Write-Host "`n次は、このJSONをクライアントPCへコピーして次を実行してください:"
-    Write-Host ".\scripts\setup-client.ps1 -ConnectionFile `"$ConnectionFile`"" -ForegroundColor Yellow
+    Write-Host "`n次は、liaison-client.jsonをクライアント版ZIPへ入れて、setup-client.ps1を実行してください。" -ForegroundColor Yellow
 } finally {
     Pop-Location
 }
