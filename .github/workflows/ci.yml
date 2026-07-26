@@ -8,7 +8,7 @@ on:
 jobs:
   windows-validation:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -75,6 +75,22 @@ jobs:
       - name: Run end-to-end smoke test
         shell: powershell
         run: .\scripts\smoke-test.ps1 -SkipBuild
+
+      - name: Build release binaries
+        run: cargo build --release -p liaison-service -p liaison-cli -p liaison-desktop
+
+      - name: Package server and client distributions
+        shell: powershell
+        run: .\scripts\build-distributions.ps1 -SkipBuild -SkipTests
+
+      - name: Upload release distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: liaison-windows-release
+          path: |
+            dist/liaison-server-windows.zip
+            dist/liaison-client-windows.zip
+          if-no-files-found: error
 
       - name: Upload test binaries
         uses: actions/upload-artifact@v4
