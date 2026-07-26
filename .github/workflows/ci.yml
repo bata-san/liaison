@@ -105,3 +105,52 @@ jobs:
             target/debug/liaison-cli.exe
             target/debug/liaison-desktop.exe
           if-no-files-found: error
+
+  macos-apple-silicon:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate macOS setup scripts
+        run: |
+          bash -n scripts/setup-server-macos.sh
+          bash -n scripts/setup-client-macos.sh
+          bash -n scripts/build-macos-distributions.sh
+          chmod +x scripts/setup-server-macos.sh scripts/setup-client-macos.sh scripts/build-macos-distributions.sh
+
+      - name: Verify Apple silicon runner
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend dependencies
+        working-directory: apps/liaison-desktop
+        run: npm install
+
+      - name: Build frontend
+        working-directory: apps/liaison-desktop
+        run: npm run build
+
+      - name: Test Rust workspace on Apple silicon
+        run: cargo test --workspace
+
+      - name: Build and package Apple silicon distributions
+        env:
+          SKIP_TESTS: "1"
+        run: ./scripts/build-macos-distributions.sh
+
+      - name: Upload Apple silicon distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: liaison-macos-apple-silicon
+          path: |
+            dist/liaison-server-macos-arm64.zip
+            dist/liaison-client-macos-arm64.zip
+          if-no-files-found: error
