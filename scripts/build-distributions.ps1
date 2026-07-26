@@ -1,6 +1,7 @@
 param(
     [string]$OutputDirectory,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,14 +25,16 @@ Require-Command "npm.cmd" "Node.js 22以降をインストールしてくださ�
 
 Push-Location $Root
 try {
-    Write-Step "フロントエンドをビルド"
-    npm --prefix apps/liaison-desktop install
-    if ($LASTEXITCODE -ne 0) {
-        throw "npm installに失敗しました。"
-    }
-    npm --prefix apps/liaison-desktop run build
-    if ($LASTEXITCODE -ne 0) {
-        throw "フロントエンドのビルドに失敗しました。"
+    if (-not $SkipBuild) {
+        Write-Step "フロントエンドをビルド"
+        npm --prefix apps/liaison-desktop install
+        if ($LASTEXITCODE -ne 0) {
+            throw "npm installに失敗しました。"
+        }
+        npm --prefix apps/liaison-desktop run build
+        if ($LASTEXITCODE -ne 0) {
+            throw "フロントエンドのビルドに失敗しました。"
+        }
     }
 
     if (-not $SkipTests) {
@@ -42,10 +45,23 @@ try {
         }
     }
 
-    Write-Step "Releaseバイナリをビルド"
-    cargo build --release -p liaison-service -p liaison-cli -p liaison-desktop
-    if ($LASTEXITCODE -ne 0) {
-        throw "Releaseビルドに失敗しました。"
+    if (-not $SkipBuild) {
+        Write-Step "Releaseバイナリをビルド"
+        cargo build --release -p liaison-service -p liaison-cli -p liaison-desktop
+        if ($LASTEXITCODE -ne 0) {
+            throw "Releaseビルドに失敗しました。"
+        }
+    }
+
+    $RequiredBinaries = @(
+        "target\release\liaison-service.exe",
+        "target\release\liaison-cli.exe",
+        "target\release\liaison-desktop.exe"
+    )
+    foreach ($binary in $RequiredBinaries) {
+        if (-not (Test-Path $binary)) {
+            throw "Releaseバイナリがありません: $binary"
+        }
     }
 
     $ServerPackage = Join-Path $OutputDirectory "liaison-server"
