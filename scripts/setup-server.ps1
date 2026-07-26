@@ -23,7 +23,7 @@ function Write-Step([string]$Message) {
 
 function Require-Command([string]$Name, [string]$InstallHint) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        throw "$Name が見つかりません。$InstallHint"
+        throw "$Name was not found. $InstallHint"
     }
 }
 
@@ -74,27 +74,27 @@ function Get-TailscaleIPv4 {
 }
 
 if (-not (Test-Administrator)) {
-    throw "管理者としてPowerShellを開き、このスクリプトをもう一度実行してください。"
+    throw "Open PowerShell as Administrator and run this script again."
 }
 
-Write-Step "前提条件を確認"
+Write-Step "Checking server prerequisites"
 $SelectedDistribution = $WslDistribution
 if ($Runtime -eq "wsl-docker") {
-    Require-Command "wsl.exe" "Windowsの『Linux用Windowsサブシステム』を有効にしてください。"
+    Require-Command "wsl.exe" "Enable Windows Subsystem for Linux first."
     $distributions = Get-WslDistributions
     if ($distributions.Count -eq 0) {
-        throw "WSLディストリビューションがありません。先に 'wsl --install -d Ubuntu' を実行してください。"
+        throw "No WSL distribution was found. Run 'wsl --install -d Ubuntu' first."
     }
     if ($distributions -notcontains $SelectedDistribution) {
         $SelectedDistribution = $distributions | Where-Object { $_ -notlike "docker-desktop*" } | Select-Object -First 1
     }
     if (-not $SelectedDistribution) {
-        throw "利用可能なWSLディストリビューションが見つかりません。"
+        throw "No usable WSL distribution was found."
     }
 
     & wsl.exe -d $SelectedDistribution -- docker version --format '{{.Server.Version}}' *> $null
     if ($LASTEXITCODE -ne 0) {
-        throw "WSL '$SelectedDistribution' 内でDockerを利用できません。Dockerを起動・設定してから再実行してください。"
+        throw "Docker is not available inside WSL distribution '$SelectedDistribution'."
     }
     Write-Host "WSL: $SelectedDistribution / Docker: OK" -ForegroundColor Green
 }
@@ -106,16 +106,16 @@ try {
     $UsePackagedBinaries = (Test-Path $PackagedServer) -and (Test-Path $PackagedCli)
 
     if ($UsePackagedBinaries) {
-        Write-Step "配布済みサーバーを使用"
+        Write-Step "Using packaged server binaries"
         $SourceServer = $PackagedServer
         $SourceCli = $PackagedCli
     } else {
-        Write-Step "サーバーをビルド"
-        Require-Command "cargo.exe" "Rustをインストールしてください: https://rustup.rs"
+        Write-Step "Building server binaries"
+        Require-Command "cargo.exe" "Install Rust from https://rustup.rs"
         if (-not $SkipBuild) {
             cargo build --release -p liaison-service -p liaison-cli
             if ($LASTEXITCODE -ne 0) {
-                throw "サーバーのReleaseビルドに失敗しました。"
+                throw "The server release build failed."
             }
         }
         $SourceServer = Join-Path $Root "target\release\liaison-service.exe"
@@ -123,10 +123,10 @@ try {
     }
 
     if (-not (Test-Path $SourceServer) -or -not (Test-Path $SourceCli)) {
-        throw "サーバーバイナリがありません。配布ZIPを使うか、-SkipBuildを外して実行してください。"
+        throw "Server binaries are missing. Use the release ZIP or run without -SkipBuild."
     }
 
-    Write-Step "既存サーバーを停止"
+    Write-Step "Stopping an existing installation"
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
@@ -135,10 +135,9 @@ try {
         Stop-Service -Name "LiaisonService" -Force -ErrorAction SilentlyContinue
         sc.exe delete LiaisonService | Out-Null
     }
-
     Get-Process -Name "liaison-service" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-    Write-Step "ファイルと設定を配置"
+    Write-Step "Installing server files"
     New-Item -ItemType Directory -Force -Path $InstallDirectory, $ConfigDirectory | Out-Null
     $ServerExe = Join-Path $InstallDirectory "liaison-service.exe"
     $CliExe = Join-Path $InstallDirectory "liaison-cli.exe"
@@ -148,7 +147,7 @@ try {
     $ConfigPath = Join-Path $ConfigDirectory "liaison.json"
     $ExamplePath = Join-Path $Root "config\liaison.example.json"
     if (-not (Test-Path $ExamplePath)) {
-        throw "設定テンプレートがありません: $ExamplePath"
+        throw "Configuration template is missing: $ExamplePath"
     }
     $Config = Get-Content $ExamplePath -Raw | ConvertFrom-Json
 
@@ -160,7 +159,7 @@ try {
                 $Token = [string]$Existing.auth_token
             }
         } catch {
-            Write-Warning "既存設定を読めなかったため、新しい設定を作成します。"
+            Write-Warning "The previous configuration could not be read. A new one will be created."
         }
     }
     if (-not $Token) {
@@ -179,11 +178,13 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
 
-    Write-Step "自動起動を登録"
+    Write-Step "Registering automatic startup"
+    $HostScript = Join-Path $InstallDirectory "start-server.ps1"
+    $HostContent = "& `"$ServerExe`" --console --config `"$ConfigPath`""
+    Set-Content -Path $HostScript -Value $HostContent -Encoding UTF8
+
     $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $EscapedServer = $ServerExe.Replace("'", "''")
-    $EscapedConfig = $ConfigPath.Replace("'", "''")
-    $TaskArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"& '$EscapedServer' --console --config '$EscapedConfig'`""
+    $TaskArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HostScript`""
     $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $TaskArguments
     $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser
     $Settings = New-ScheduledTaskSettingsSet `
@@ -203,7 +204,7 @@ try {
         -Force | Out-Null
     Start-ScheduledTask -TaskName $TaskName
 
-    Write-Step "接続を確認"
+    Write-Step "Checking local server connection"
     $Ready = $false
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
@@ -214,7 +215,7 @@ try {
         }
     }
     if (-not $Ready) {
-        throw "サーバーは配置されましたが、起動確認に失敗しました。タスクスケジューラの '$TaskName' を確認してください。"
+        throw "The server was installed but did not pass its health check. Check scheduled task '$TaskName'."
     }
 
     $Transport = "local"
@@ -225,7 +226,7 @@ try {
     }
 
     if ($TailscaleIp) {
-        Write-Step "Tailscale経由のクライアント接続を設定"
+        Write-Step "Configuring Tailscale client access"
         Set-Service -Name iphlpsvc -StartupType Automatic
         Start-Service -Name iphlpsvc -ErrorAction SilentlyContinue
         netsh interface portproxy delete v4tov4 listenaddress=$TailscaleIp listenport=$Port *> $null
@@ -246,10 +247,10 @@ try {
         $ClientAddress = "${TailscaleIp}:$Port"
     } else {
         Remove-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
-        Write-Warning "Tailscale IPを検出できなかったため、このPC内からのみ接続できます。別PCから使う場合はTailscaleを起動して再実行してください。"
+        Write-Warning "No Tailscale IP was detected. The server is available only on this PC."
     }
 
-    Write-Step "クライアント接続ファイルを作成"
+    Write-Step "Creating the client connection file"
     $ConnectionDirectory = Split-Path -Parent $ConnectionFile
     if ($ConnectionDirectory) {
         New-Item -ItemType Directory -Force -Path $ConnectionDirectory | Out-Null
@@ -268,10 +269,10 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
 
-    Write-Host "`nセットアップ完了" -ForegroundColor Green
-    Write-Host "サーバー: $ClientAddress"
-    Write-Host "接続ファイル: $ConnectionFile"
-    Write-Host "`n次は、liaison-client.jsonをクライアント版ZIPへ入れて、setup-client.ps1を実行してください。" -ForegroundColor Yellow
+    Write-Host "`nServer setup completed." -ForegroundColor Green
+    Write-Host "Server address: $ClientAddress"
+    Write-Host "Client connection file: $ConnectionFile"
+    Write-Host "Copy liaison-client.json into the extracted client package and run setup-client.ps1." -ForegroundColor Yellow
 } finally {
     Pop-Location
 }
