@@ -35,7 +35,12 @@ function Test-Administrator {
 
 function New-RandomToken {
     $bytes = New-Object byte[] 32
-    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    } finally {
+        $generator.Dispose()
+    }
     return -join ($bytes | ForEach-Object { $_.ToString("x2") })
 }
 
