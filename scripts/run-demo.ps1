@@ -42,6 +42,10 @@ $ConfigJson = @{
     workspace_image = "ubuntu:24.04"
     persistent_image = "ubuntu:24.04"
     data_directory = $DemoDir
+    auto_tune = $false
+    host_cpu_reserve_percent = 15
+    host_memory_reserve_percent = 20
+    minimum_host_memory_mib = 2048
     persistent_pool = @{ cpu_threads = 6; memory_mib = 8192 }
     workspace_pool = @{ cpu_threads = 38; memory_mib = 40960 }
     class_workspace_pool = @{ cpu_threads = 12; memory_mib = 16384 }
@@ -91,8 +95,6 @@ try {
         } else {
             Push-Location (Join-Path $Root "apps\liaison-desktop")
             try {
-                # Always reconcile dependencies. This is fast when node_modules is current
-                # and ensures newly added UI packages are installed on existing checkouts.
                 npm install --no-audit --no-fund
                 if ($LASTEXITCODE -ne 0) { throw "Frontend dependency installation failed" }
 
