@@ -1,81 +1,122 @@
 # Liaison
 
-Liaison is a lightweight, rich workstation orchestrator for a school-owned Windows 11 Pro workstation.
-It keeps Windows native for classroom use while splitting a shared remote resource pool into two persistent slots and up to five workspace slots.
+Liaisonは、WindowsワークステーションのCPU・RAM・GPUを、PersistentスロットとWorkspaceスロットへ割り当てる軽量な管理ツールです。
 
-## What is implemented
+## いちばん簡単な使い方
 
-- Rust Windows service with a loopback-only, token-authenticated control protocol.
-- Dynamic CPU and RAM distribution across 0–5 workspace slots.
-- Two protected persistent slots.
-- Remote, Class, Local-exclusive, and Maintenance modes.
-- Exclusive/shared GPU reservation policy.
-- Safe mock runtime for GUI and workflow testing without touching WSL or Docker.
-- WSL Docker runtime adapter for the real host.
-- Tauri 2 desktop dashboard using the Windows WebView2 runtime.
-- Rust CLI for diagnostics and automation.
-- Windows smoke tests covering the complete control flow.
+Liaisonは2つに分かれています。
 
-## Why this stays lightweight
+- **Server版**: 管理対象のWindows PCへ入れます。WSL・Docker・GPUを操作します。
+- **Client版**: 操作用PCへ入れます。設定画面だけを提供します。
 
-- The always-on service is Rust and uses the standard TCP stack rather than an embedded web server.
-- Runtime state is persisted as JSON; there is no database daemon.
-- The GUI uses Tauri/WebView2 rather than shipping a Chromium/Electron process tree.
-- The frontend is vanilla TypeScript and CSS with no UI framework.
-- The GUI may be closed while the service continues to run.
+配布ZIPには実行ファイルが含まれるため、セットアップ先PCにRustやNode.jsは不要です。
 
-## Safe demo
+### 1. 配布ZIPを作る
 
-The mock runtime does not start WSL, Docker, containers, or GPU workloads.
+開発PCで1回だけ実行します。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run-demo.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\build-distributions.ps1
 ```
 
-For a terminal-only demonstration:
+次の2ファイルが作られます。
+
+```text
+dist\liaison-server-windows.zip
+dist\liaison-client-windows.zip
+```
+
+### 2. Server版をセットアップ
+
+`liaison-server-windows.zip`をサーバーPCで展開し、管理者PowerShellで実行します。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run-demo.ps1 -NoGui
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-server.ps1
 ```
 
-## Automated test
+セットアップが自動で行うこと:
+
+- マシンスペックの検出とリソース自動調整
+- サーバーファイルと設定の配置
+- 強いランダムトークンの生成
+- ログオン時の自動起動登録
+- WSLとDockerの確認
+- Tailscale IPの自動検出
+- Tailscale専用のファイアウォールとポート転送
+- サーバー疎通確認
+- デスクトップへの`liaison-client.json`生成
+
+Tailscaleがない場合は、そのサーバーPC内だけから接続できるローカル構成になります。
+
+### 3. Client版をセットアップ
+
+`liaison-client-windows.zip`をクライアントPCで展開します。
+
+サーバーPCのデスクトップに作成された`liaison-client.json`を、クライアント版フォルダーの直下へコピーします。
+
+通常のPowerShellで実行します。管理者権限は不要です。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\test-all.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-client.ps1
 ```
 
-The end-to-end smoke test verifies service startup, a five-way workspace split, GPU reservation, Class throttling, and Local-exclusive protection of P1/P2.
+セットアップ後は、デスクトップまたはスタートメニューの**Liaison Client**から起動できます。接続先やトークンを毎回入力する必要はありません。
 
-## Development prerequisites
+## リポジトリから直接セットアップ
+
+配布ZIPを作らず、ソースから直接セットアップすることもできます。この場合だけRustとNode.jsが必要です。
+
+Server:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-server.ps1
+```
+
+Client:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-client.ps1 -ConnectionFile .\liaison-client.json
+```
+
+## Server版の前提条件
+
+本番の`wsl-docker`モードでは以下が必要です。
 
 - Windows 11 Pro
-- Rust stable with the MSVC toolchain
-- Microsoft C++ Build Tools
-- Node.js 22 or newer
-- Microsoft Edge WebView2 Runtime
+- WSL 2ディストリビューション
+- WSL内で利用可能なDocker
+- GPUを使う場合はNVIDIAドライバーとWSL GPU対応
+- 別PCから操作する場合はServer・Client両方のTailscale
+
+テスト用にDockerを使用しない場合:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-server.ps1 -Runtime mock -LocalOnly
+```
+
+## 開発とテスト
 
 ```powershell
 npm --prefix apps/liaison-desktop install
-cargo test --workspace
 npm --prefix apps/liaison-desktop run build
+cargo test --workspace
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-test.ps1
 ```
 
-## Runtime modes
+安全なGUIデモ:
 
-### Mock
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-demo.ps1
+```
 
-Use for development, GUI review, tests, and CI. No workstation resources are changed.
+## 構成
 
-### WSL Docker
+- Rustの常駐サーバー
+- Tauri 2 + ReactのWindowsクライアント
+- ループバック限定のサーバープロセス
+- Tailscale IPからループバックへ限定転送
+- 16文字以上のトークン認証
+- WSL Dockerランタイムと安全なMockランタイム
+- CPU・RAM・GPUと最大Worker数の自動検出
 
-Uses `wsl.exe -d LiaisonRuntime -- docker ...`. The adapter creates one container per slot, applies CPU/RAM limits, stores each workspace in a named volume, and recreates a container when GPU access changes.
-
-## Security boundary
-
-- The service listens only on `127.0.0.1` or `::1`.
-- Every request requires a local token of at least 16 characters.
-- The desktop and CLI send structured commands, never arbitrary PowerShell.
-- Workspace containers do not receive the Docker socket or Windows administrator access.
-- Tailscale remains the external network boundary.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/TESTING.md](docs/TESTING.md).
+詳細は`docs/ARCHITECTURE.md`と`docs/TESTING.md`を参照してください。
