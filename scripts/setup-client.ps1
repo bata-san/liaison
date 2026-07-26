@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
+$PackagedBin = Join-Path $Root "bin"
 $ClientConfigDirectory = Join-Path $env:APPDATA "Liaison"
 $ClientConfigPath = Join-Path $ClientConfigDirectory "client.json"
 
@@ -27,6 +28,7 @@ function Find-ConnectionFile([string]$RequestedPath) {
         $candidates += $RequestedPath
     }
     $candidates += @(
+        (Join-Path $Root "liaison-client.json"),
         (Join-Path (Get-Location) "liaison-client.json"),
         (Join-Path $env:USERPROFILE "Desktop\liaison-client.json"),
         (Join-Path $env:USERPROFILE "Downloads\liaison-client.json")
@@ -61,7 +63,7 @@ function New-Shortcut(
 Write-Step "接続ファイルを確認"
 $ResolvedConnectionFile = Find-ConnectionFile $ConnectionFile
 if (-not $ResolvedConnectionFile) {
-    throw "liaison-client.jsonが見つかりません。サーバーPCでsetup-server.ps1を実行し、生成されたJSONをこのPCへコピーしてください。"
+    throw "liaison-client.jsonが見つかりません。サーバーPCでsetup-server.ps1を実行し、生成されたJSONをクライアント版フォルダーへコピーしてください。"
 }
 
 $Connection = Get-Content $ResolvedConnectionFile -Raw | ConvertFrom-Json
@@ -73,31 +75,40 @@ if (-not $Connection.token -or ([string]$Connection.token).Length -lt 16) {
 }
 Write-Host "接続先: $($Connection.address)" -ForegroundColor Green
 
-Write-Step "クライアントをビルド"
-Require-Command "cargo.exe" "Rustをインストールしてください: https://rustup.rs"
-Require-Command "npm.cmd" "Node.js 22以降をインストールしてください。"
-
 Push-Location $Root
 try {
-    if (-not $SkipBuild) {
-        npm --prefix apps/liaison-desktop install
-        if ($LASTEXITCODE -ne 0) {
-            throw "フロントエンド依存関係のインストールに失敗しました。"
+    $PackagedClient = Join-Path $PackagedBin "liaison-desktop.exe"
+    $PackagedCli = Join-Path $PackagedBin "liaison-cli.exe"
+    $UsePackagedBinaries = (Test-Path $PackagedClient) -and (Test-Path $PackagedCli)
+
+    if ($UsePackagedBinaries) {
+        Write-Step "配布済みクライアントを使用"
+        $SourceClient = $PackagedClient
+        $SourceCli = $PackagedCli
+    } else {
+        Write-Step "クライアントをビルド"
+        Require-Command "cargo.exe" "Rustをインストールしてください: https://rustup.rs"
+        Require-Command "npm.cmd" "Node.js 22以降をインストールしてください。"
+        if (-not $SkipBuild) {
+            npm --prefix apps/liaison-desktop install
+            if ($LASTEXITCODE -ne 0) {
+                throw "フロントエンド依存関係のインストールに失敗しました。"
+            }
+            npm --prefix apps/liaison-desktop run build
+            if ($LASTEXITCODE -ne 0) {
+                throw "フロントエンドのビルドに失敗しました。"
+            }
+            cargo build --release -p liaison-desktop -p liaison-cli
+            if ($LASTEXITCODE -ne 0) {
+                throw "クライアントのReleaseビルドに失敗しました。"
+            }
         }
-        npm --prefix apps/liaison-desktop run build
-        if ($LASTEXITCODE -ne 0) {
-            throw "フロントエンドのビルドに失敗しました。"
-        }
-        cargo build --release -p liaison-desktop -p liaison-cli
-        if ($LASTEXITCODE -ne 0) {
-            throw "クライアントのReleaseビルドに失敗しました。"
-        }
+        $SourceClient = Join-Path $Root "target\release\liaison-desktop.exe"
+        $SourceCli = Join-Path $Root "target\release\liaison-cli.exe"
     }
 
-    $SourceClient = Join-Path $Root "target\release\liaison-desktop.exe"
-    $SourceCli = Join-Path $Root "target\release\liaison-cli.exe"
     if (-not (Test-Path $SourceClient) -or -not (Test-Path $SourceCli)) {
-        throw "Releaseバイナリがありません。-SkipBuildを外して実行してください。"
+        throw "クライアントバイナリがありません。配布ZIPを使うか、-SkipBuildを外して実行してください。"
     }
 
     Write-Step "クライアントをインストール"
