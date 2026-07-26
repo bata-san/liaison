@@ -18,7 +18,7 @@ function Write-Step([string]$Message) {
 
 function Require-Command([string]$Name, [string]$InstallHint) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        throw "$Name が見つかりません。$InstallHint"
+        throw "$Name was not found. $InstallHint"
     }
 }
 
@@ -60,20 +60,20 @@ function New-Shortcut(
     $shortcut.Save()
 }
 
-Write-Step "接続ファイルを確認"
+Write-Step "Checking the client connection file"
 $ResolvedConnectionFile = Find-ConnectionFile $ConnectionFile
 if (-not $ResolvedConnectionFile) {
-    throw "liaison-client.jsonが見つかりません。サーバーPCでsetup-server.ps1を実行し、生成されたJSONをクライアント版フォルダーへコピーしてください。"
+    throw "liaison-client.json was not found. Run setup-server.ps1 on the server and copy the generated JSON into the client package folder."
 }
 
 $Connection = Get-Content $ResolvedConnectionFile -Raw | ConvertFrom-Json
 if (-not $Connection.address) {
-    throw "接続ファイルにaddressがありません: $ResolvedConnectionFile"
+    throw "The connection file does not contain an address: $ResolvedConnectionFile"
 }
 if (-not $Connection.token -or ([string]$Connection.token).Length -lt 16) {
-    throw "接続ファイルのtokenが無効です: $ResolvedConnectionFile"
+    throw "The connection token is invalid: $ResolvedConnectionFile"
 }
-Write-Host "接続先: $($Connection.address)" -ForegroundColor Green
+Write-Host "Server: $($Connection.address)" -ForegroundColor Green
 
 Push-Location $Root
 try {
@@ -82,25 +82,25 @@ try {
     $UsePackagedBinaries = (Test-Path $PackagedClient) -and (Test-Path $PackagedCli)
 
     if ($UsePackagedBinaries) {
-        Write-Step "配布済みクライアントを使用"
+        Write-Step "Using packaged client binaries"
         $SourceClient = $PackagedClient
         $SourceCli = $PackagedCli
     } else {
-        Write-Step "クライアントをビルド"
-        Require-Command "cargo.exe" "Rustをインストールしてください: https://rustup.rs"
-        Require-Command "npm.cmd" "Node.js 22以降をインストールしてください。"
+        Write-Step "Building client binaries"
+        Require-Command "cargo.exe" "Install Rust from https://rustup.rs"
+        Require-Command "npm.cmd" "Install Node.js 22 or newer."
         if (-not $SkipBuild) {
             npm --prefix apps/liaison-desktop install
             if ($LASTEXITCODE -ne 0) {
-                throw "フロントエンド依存関係のインストールに失敗しました。"
+                throw "npm install failed."
             }
             npm --prefix apps/liaison-desktop run build
             if ($LASTEXITCODE -ne 0) {
-                throw "フロントエンドのビルドに失敗しました。"
+                throw "The frontend build failed."
             }
             cargo build --release -p liaison-desktop -p liaison-cli
             if ($LASTEXITCODE -ne 0) {
-                throw "クライアントのReleaseビルドに失敗しました。"
+                throw "The client release build failed."
             }
         }
         $SourceClient = Join-Path $Root "target\release\liaison-desktop.exe"
@@ -108,10 +108,10 @@ try {
     }
 
     if (-not (Test-Path $SourceClient) -or -not (Test-Path $SourceCli)) {
-        throw "クライアントバイナリがありません。配布ZIPを使うか、-SkipBuildを外して実行してください。"
+        throw "Client binaries are missing. Use the release ZIP or run without -SkipBuild."
     }
 
-    Write-Step "クライアントをインストール"
+    Write-Step "Installing the client"
     New-Item -ItemType Directory -Force -Path $InstallDirectory, $ClientConfigDirectory | Out-Null
     $ClientExe = Join-Path $InstallDirectory "liaison-desktop.exe"
     $CliExe = Join-Path $InstallDirectory "liaison-cli.exe"
@@ -136,7 +136,7 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
 
-    Write-Step "ショートカットを作成"
+    Write-Step "Creating shortcuts"
     $StartMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Liaison Client.lnk"
     New-Shortcut $StartMenuShortcut $LauncherPath $InstallDirectory $ClientExe
     if (-not $NoDesktopShortcut) {
@@ -144,17 +144,17 @@ try {
         New-Shortcut $DesktopShortcut $LauncherPath $InstallDirectory $ClientExe
     }
 
-    Write-Step "サーバー接続を確認"
+    Write-Step "Checking the server connection"
     & $CliExe --address ([string]$Connection.address) --token ([string]$Connection.token) health
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning "インストールは完了しましたが、サーバーへ接続できません。サーバー、Tailscale、ファイアウォールを確認してください。"
+        Write-Warning "The client was installed, but the server could not be reached. Check the server, Tailscale, and Windows Firewall."
     } else {
-        Write-Host "接続: OK" -ForegroundColor Green
+        Write-Host "Connection: OK" -ForegroundColor Green
     }
 
-    Write-Host "`nセットアップ完了" -ForegroundColor Green
-    Write-Host "スタートメニューまたはデスクトップの『Liaison Client』から起動できます。"
-    Write-Host "設定: $ClientConfigPath"
+    Write-Host "`nClient setup completed." -ForegroundColor Green
+    Write-Host "Open 'Liaison Client' from the desktop or Start menu."
+    Write-Host "Client configuration: $ClientConfigPath"
 
     if (-not $NoLaunch) {
         & $LauncherPath
