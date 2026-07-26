@@ -12,63 +12,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate server setup script
+      - name: Collect PowerShell syntax errors
         shell: powershell
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "scripts/setup-server.ps1"),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Host $_.Message }
-            exit 1
+          $files = @(
+            "scripts/setup-server.ps1",
+            "scripts/setup-client.ps1",
+            "scripts/start-client.ps1",
+            "scripts/build-distributions.ps1"
+          )
+          $messages = @()
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            foreach ($parseError in $errors) {
+              $messages += "$file`:$($parseError.Extent.StartLineNumber):$($parseError.Extent.StartColumnNumber) $($parseError.Message)"
+            }
           }
+          $messages | Set-Content powershell-parse-errors.txt -Encoding UTF8
+          $messages | ForEach-Object { Write-Host $_ }
 
-      - name: Validate client setup script
+      - name: Upload PowerShell parse diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: powershell-parse-errors
+          path: powershell-parse-errors.txt
+          if-no-files-found: error
+
+      - name: Fail on PowerShell syntax errors
         shell: powershell
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "scripts/setup-client.ps1"),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
+          $errors = @(Get-Content powershell-parse-errors.txt | Where-Object { $_ })
           if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Host $_.Message }
-            exit 1
-          }
-
-      - name: Validate client launcher script
-        shell: powershell
-        run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "scripts/start-client.ps1"),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Host $_.Message }
-            exit 1
-          }
-
-      - name: Validate distribution builder script
-        shell: powershell
-        run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "scripts/build-distributions.ps1"),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Host $_.Message }
+            $errors | ForEach-Object { Write-Error $_ }
             exit 1
           }
 
