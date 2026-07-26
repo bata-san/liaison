@@ -17,6 +17,10 @@ $ConfigJson = @{
     workspace_image = "ubuntu:24.04"
     persistent_image = "ubuntu:24.04"
     data_directory = $TempRoot
+    auto_tune = $false
+    host_cpu_reserve_percent = 15
+    host_memory_reserve_percent = 20
+    minimum_host_memory_mib = 2048
     persistent_pool = @{ cpu_threads = 6; memory_mib = 8192 }
     workspace_pool = @{ cpu_threads = 38; memory_mib = 40960 }
     class_workspace_pool = @{ cpu_threads = 12; memory_mib = 16384 }
