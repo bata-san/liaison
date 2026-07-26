@@ -65,6 +65,28 @@ fn stop_slot(slot_id: String, state: State<'_, AppState>) -> Result<SystemSnapsh
 }
 
 #[tauri::command]
+fn resize_slot(
+    slot_id: String,
+    cpu_threads: u16,
+    memory_mib: u32,
+    state: State<'_, AppState>,
+) -> Result<SystemSnapshot, String> {
+    snapshot_from(
+        state
+            .client
+            .send(Command::ResizeSlot {
+                slot_id,
+                allocation: ResourceAllocation {
+                    cpu_threads,
+                    memory_mib,
+                    gpu: GpuAccess::None,
+                },
+            })
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+#[tauri::command]
 fn assign_worker(
     slot_id: String,
     cpu_threads: u16,
@@ -129,6 +151,7 @@ fn main() {
             rebalance,
             start_slot,
             stop_slot,
+            resize_slot,
             assign_worker,
             reserve_gpu,
             release_gpu,
