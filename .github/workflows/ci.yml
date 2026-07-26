@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Collect PowerShell syntax errors
+      - name: Validate PowerShell setup scripts
         shell: powershell
         run: |
           $files = @(
@@ -34,22 +34,8 @@ jobs:
               $messages += "$file`:$($parseError.Extent.StartLineNumber):$($parseError.Extent.StartColumnNumber) $($parseError.Message)"
             }
           }
-          $messages | Set-Content powershell-parse-errors.txt -Encoding UTF8
-          $messages | ForEach-Object { Write-Host $_ }
-
-      - name: Upload PowerShell parse diagnostics
-        uses: actions/upload-artifact@v4
-        with:
-          name: powershell-parse-errors
-          path: powershell-parse-errors.txt
-          if-no-files-found: error
-
-      - name: Fail on PowerShell syntax errors
-        shell: powershell
-        run: |
-          $errors = @(Get-Content powershell-parse-errors.txt | Where-Object { $_ })
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Error $_ }
+          if ($messages.Count -gt 0) {
+            $messages | ForEach-Object { Write-Host $_ }
             exit 1
           }
 
