@@ -1,4 +1,6 @@
 mod app;
+#[cfg(not(windows))]
+mod direct_docker;
 mod server;
 
 use std::{
@@ -8,6 +10,8 @@ use std::{
 };
 
 use app::ServiceApp;
+#[cfg(not(windows))]
+use direct_docker::DirectDockerRuntime;
 use liaison_core::{detected_cpu_threads, AppConfig, RuntimeKind};
 use liaison_runtime::{MockRuntime, RuntimeAdapter, WslDockerRuntime};
 
@@ -69,11 +73,23 @@ fn run_with_config(
     config.validate()?;
     let runtime: Arc<dyn RuntimeAdapter> = match config.runtime {
         RuntimeKind::Mock => Arc::new(MockRuntime::new()),
-        RuntimeKind::WslDocker => Arc::new(WslDockerRuntime::new(
-            config.wsl_distribution.clone(),
-            config.workspace_image.clone(),
-            config.persistent_image.clone(),
-        )),
+        RuntimeKind::WslDocker => {
+            #[cfg(windows)]
+            {
+                Arc::new(WslDockerRuntime::new(
+                    config.wsl_distribution.clone(),
+                    config.workspace_image.clone(),
+                    config.persistent_image.clone(),
+                ))
+            }
+            #[cfg(not(windows))]
+            {
+                Arc::new(DirectDockerRuntime::new(
+                    config.workspace_image.clone(),
+                    config.persistent_image.clone(),
+                ))
+            }
+        }
     };
 
     if config.auto_tune {
@@ -130,17 +146,21 @@ impl Options {
                 "--runtime" => {
                     let runtime = arguments
                         .next()
-                        .ok_or("--runtime requires mock or wsl-docker")?;
+                        .ok_or("--runtime requires mock, docker, or wsl-docker")?;
                     runtime_override = Some(match runtime.as_str() {
                         "mock" => RuntimeKind::Mock,
-                        "wsl-docker" => RuntimeKind::WslDocker,
-                        _ => return Err("--runtime must be mock or wsl-docker".to_owned()),
+                        "docker" | "wsl-docker" => RuntimeKind::WslDocker,
+                        _ => {
+                            return Err(
+                                "--runtime must be mock, docker, or wsl-docker".to_owned(),
+                            )
+                        }
                     });
                 }
                 "--print-default-config" => print_default_config = true,
                 "--help" | "-h" => {
                     return Err(
-                        "Usage: liaison-service [--console] [--config PATH] [--runtime mock|wsl-docker] [--print-default-config]"
+                        "Usage: liaison-service [--console] [--config PATH] [--runtime mock|docker|wsl-docker] [--print-default-config]"
                             .to_owned(),
                     )
                 }
@@ -168,9 +188,24 @@ fn default_config_path() -> PathBuf {
             .join("Liaison")
             .join("liaison.json");
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        PathBuf::from("liaison.local.json")
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("Liaison")
+            .join("liaison.json");
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_owned()))
+                    .join(".config")
+            });
+        base.join("liaison").join("liaison.json")
     }
 }
 
