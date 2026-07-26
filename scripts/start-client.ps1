@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 if (-not (Test-Path $ConfigPath)) {
     Add-Type -AssemblyName PresentationFramework
     [System.Windows.MessageBox]::Show(
-        "クライアント設定がありません。setup-client.ps1を先に実行してください。",
+        "Client configuration was not found. Run setup-client.ps1 first.",
         "Liaison Client",
         "OK",
         "Error"
@@ -17,12 +17,12 @@ if (-not (Test-Path $ConfigPath)) {
 
 $Config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 if (-not $Config.address -or -not $Config.token) {
-    throw "クライアント設定にaddressまたはtokenがありません: $ConfigPath"
+    throw "The client configuration does not contain address or token: $ConfigPath"
 }
 
 $ClientExe = Join-Path $PSScriptRoot "liaison-desktop.exe"
 if (-not (Test-Path $ClientExe)) {
-    throw "クライアント本体がありません: $ClientExe"
+    throw "The client executable was not found: $ClientExe"
 }
 
 $env:LIAISON_ADDRESS = [string]$Config.address
