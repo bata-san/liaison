@@ -1,11 +1,15 @@
 {
   "listen_address": "127.0.0.1:57841",
   "auth_token": "replace-with-a-long-random-local-token",
-  "runtime": "mock",
+  "runtime": "wsl-docker",
   "wsl_distribution": "LiaisonRuntime",
   "workspace_image": "ubuntu:24.04",
   "persistent_image": "ubuntu:24.04",
   "data_directory": "C:\\ProgramData\\Liaison\\runtime-data",
+  "auto_tune": true,
+  "host_cpu_reserve_percent": 15,
+  "host_memory_reserve_percent": 20,
+  "minimum_host_memory_mib": 2048,
   "persistent_pool": {
     "cpu_threads": 6,
     "memory_mib": 8192
