@@ -12,27 +12,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate PowerShell setup scripts
+      - name: Validate server setup script
         shell: powershell
         run: |
-          $files = @(
-            "scripts/setup-server.ps1",
-            "scripts/setup-client.ps1",
-            "scripts/start-client.ps1",
-            "scripts/build-distributions.ps1"
-          )
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $file),
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error "$file`: $($_.Message)" }
-              exit 1
-            }
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/setup-server.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            exit 1
+          }
+
+      - name: Validate client setup script
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/setup-client.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            exit 1
+          }
+
+      - name: Validate client launcher script
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/start-client.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            exit 1
+          }
+
+      - name: Validate distribution builder script
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/build-distributions.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            exit 1
           }
 
       - name: Install Rust
