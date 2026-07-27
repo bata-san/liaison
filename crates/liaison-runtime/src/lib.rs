@@ -5,11 +5,21 @@ use std::{
 };
 
 use liaison_core::{
-    GpuAccess, GpuMetrics, HostMetrics, ResourceAllocation, RuntimeKind, SlotKind, SlotSummary,
-    SlotStatus,
+    GpuAccess, GpuMetrics, HostMetrics, ResourceAllocation, RuntimeKind, SlotKind, SlotStatus,
+    SlotSummary,
 };
 use sysinfo::System;
 use thiserror::Error;
+
+const COMMAND_OUTPUT_LIMIT: usize = 48 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCommandOutput {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+}
 
 pub trait RuntimeAdapter: Send + Sync {
     fn kind(&self) -> RuntimeKind;
@@ -28,6 +38,23 @@ pub trait RuntimeAdapter: Send + Sync {
     fn collect_host_metrics(&self) -> HostMetrics;
     fn collect_gpu_metrics(&self) -> GpuMetrics;
     fn tailscale_online(&self) -> bool;
+
+    fn reconcile_slot(&self, slot: &SlotSummary) -> Result<(), RuntimeError> {
+        if slot.status == SlotStatus::Stopped {
+            self.stop_slot(&slot.id)
+        } else {
+            self.start_slot(slot)
+        }
+    }
+
+    fn exec_workspace(
+        &self,
+        slot_id: &str,
+        command: &str,
+        working_directory: &str,
+    ) -> Result<RuntimeCommandOutput, RuntimeError>;
+
+    fn stop_all(&self) -> Result<(), RuntimeError>;
 }
 
 #[derive(Debug, Default)]
@@ -132,6 +159,35 @@ impl RuntimeAdapter for MockRuntime {
     fn tailscale_online(&self) -> bool {
         true
     }
+
+    fn exec_workspace(
+        &self,
+        slot_id: &str,
+        command: &str,
+        working_directory: &str,
+    ) -> Result<RuntimeCommandOutput, RuntimeError> {
+        let slots = self
+            .slots
+            .lock()
+            .map_err(|_| RuntimeError::State("mock runtime lock poisoned".to_owned()))?;
+        if !slots.contains_key(slot_id) {
+            return Err(RuntimeError::NotFound(slot_id.to_owned()));
+        }
+        Ok(RuntimeCommandOutput {
+            exit_code: 0,
+            stdout: format!("mock {slot_id}:{working_directory}$ {command}\n"),
+            stderr: String::new(),
+            truncated: false,
+        })
+    }
+
+    fn stop_all(&self) -> Result<(), RuntimeError> {
+        self.slots
+            .lock()
+            .map_err(|_| RuntimeError::State("mock runtime lock poisoned".to_owned()))?
+            .clear();
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +195,14 @@ pub struct WslDockerRuntime {
     distribution: String,
     workspace_image: String,
     persistent_image: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContainerLimits {
+    running: bool,
+    nano_cpus: i64,
+    memory_bytes: i64,
+    memory_swap_bytes: i64,
 }
 
 impl WslDockerRuntime {
@@ -158,6 +222,14 @@ impl WslDockerRuntime {
         format!("liaison-{}", slot_id.to_ascii_lowercase())
     }
 
+    fn slot_kind(slot_id: &str) -> Result<SlotKind, RuntimeError> {
+        match slot_id.chars().next().map(|value| value.to_ascii_uppercase()) {
+            Some('P') => Ok(SlotKind::Persistent),
+            Some('W') => Ok(SlotKind::Workspace),
+            _ => Err(RuntimeError::State(format!("invalid slot id: {slot_id}"))),
+        }
+    }
+
     fn image_for(&self, kind: SlotKind) -> &str {
         match kind {
             SlotKind::Persistent => &self.persistent_image,
@@ -165,14 +237,18 @@ impl WslDockerRuntime {
         }
     }
 
-    fn run_wsl(&self, arguments: &[String]) -> Result<Output, RuntimeError> {
-        let output = Command::new("wsl.exe")
+    fn run_wsl_raw(&self, arguments: &[String]) -> Result<Output, RuntimeError> {
+        Command::new("wsl.exe")
             .arg("-d")
             .arg(&self.distribution)
             .arg("--")
             .args(arguments)
             .output()
-            .map_err(RuntimeError::Io)?;
+            .map_err(RuntimeError::Io)
+    }
+
+    fn run_wsl(&self, arguments: &[String]) -> Result<Output, RuntimeError> {
+        let output = self.run_wsl_raw(arguments)?;
         if output.status.success() {
             Ok(output)
         } else {
@@ -183,19 +259,176 @@ impl WslDockerRuntime {
         }
     }
 
-    fn docker(&self, arguments: Vec<String>) -> Result<Output, RuntimeError> {
+    fn docker_raw(&self, arguments: &[String]) -> Result<Output, RuntimeError> {
         let mut command = vec!["docker".to_owned()];
-        command.extend(arguments);
+        command.extend_from_slice(arguments);
+        self.run_wsl_raw(&command)
+    }
+
+    fn docker(&self, arguments: &[String]) -> Result<Output, RuntimeError> {
+        let mut command = vec!["docker".to_owned()];
+        command.extend_from_slice(arguments);
         self.run_wsl(&command)
     }
 
     fn exists(&self, slot_id: &str) -> bool {
-        self.docker(vec![
+        self.docker(&[
             "container".to_owned(),
             "inspect".to_owned(),
             Self::container_name(slot_id),
         ])
         .is_ok()
+    }
+
+    fn inspect_limits(&self, slot_id: &str) -> Result<ContainerLimits, RuntimeError> {
+        let output = self.docker(&[
+            "inspect".to_owned(),
+            "--format".to_owned(),
+            "{{.State.Running}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}".to_owned(),
+            Self::container_name(slot_id),
+        ])?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let values: Vec<_> = text.trim().split('|').collect();
+        if values.len() != 4 {
+            return Err(RuntimeError::State(format!(
+                "unexpected Docker inspect result for {slot_id}: {}",
+                text.trim()
+            )));
+        }
+        Ok(ContainerLimits {
+            running: values[0] == "true",
+            nano_cpus: values[1].parse().unwrap_or_default(),
+            memory_bytes: values[2].parse().unwrap_or_default(),
+            memory_swap_bytes: values[3].parse().unwrap_or_default(),
+        })
+    }
+
+    fn expected_limits(allocation: &ResourceAllocation) -> (i64, i64) {
+        (
+            i64::from(allocation.cpu_threads) * 1_000_000_000,
+            i64::from(allocation.memory_mib) * 1024 * 1024,
+        )
+    }
+
+    fn limits_match(limits: ContainerLimits, allocation: &ResourceAllocation) -> bool {
+        let (nano_cpus, memory_bytes) = Self::expected_limits(allocation);
+        limits.nano_cpus == nano_cpus
+            && limits.memory_bytes == memory_bytes
+            && limits.memory_swap_bytes == memory_bytes
+    }
+
+    fn update_limits(
+        &self,
+        slot_id: &str,
+        allocation: &ResourceAllocation,
+    ) -> Result<(), RuntimeError> {
+        let memory = format!("{}m", allocation.memory_mib);
+        self.docker(&[
+            "update".to_owned(),
+            "--cpus".to_owned(),
+            allocation.cpu_threads.to_string(),
+            "--memory".to_owned(),
+            memory.clone(),
+            "--memory-swap".to_owned(),
+            memory,
+            Self::container_name(slot_id),
+        ])?;
+        Ok(())
+    }
+
+    fn run_container(
+        &self,
+        slot_id: &str,
+        kind: SlotKind,
+        allocation: &ResourceAllocation,
+    ) -> Result<(), RuntimeError> {
+        let name = Self::container_name(slot_id);
+        let volume = format!("liaison_{}_data", slot_id.to_ascii_lowercase());
+        let memory = format!("{}m", allocation.memory_mib);
+        let mut arguments = vec![
+            "run".to_owned(),
+            "--detach".to_owned(),
+            "--name".to_owned(),
+            name,
+            "--restart".to_owned(),
+            if kind == SlotKind::Persistent {
+                "unless-stopped"
+            } else {
+                "no"
+            }
+            .to_owned(),
+            "--cpus".to_owned(),
+            allocation.cpu_threads.to_string(),
+            "--memory".to_owned(),
+            memory.clone(),
+            "--memory-swap".to_owned(),
+            memory,
+            "--label".to_owned(),
+            format!("liaison.slot={slot_id}"),
+            "--volume".to_owned(),
+            format!("{volume}:/workspace"),
+        ];
+        if allocation.gpu != GpuAccess::None {
+            arguments.extend(["--gpus".to_owned(), "all".to_owned()]);
+        }
+        arguments.extend([
+            self.image_for(kind).to_owned(),
+            "sh".to_owned(),
+            "-lc".to_owned(),
+            "trap : TERM INT; sleep infinity & wait".to_owned(),
+        ]);
+        self.docker(&arguments)?;
+        Ok(())
+    }
+
+    fn remove_container(&self, slot_id: &str) -> Result<(), RuntimeError> {
+        let name = Self::container_name(slot_id);
+        let _ = self.docker(&[
+            "stop".to_owned(),
+            "--time".to_owned(),
+            "20".to_owned(),
+            name.clone(),
+        ]);
+        self.docker(&["rm".to_owned(), "--force".to_owned(), name])?;
+        Ok(())
+    }
+
+    fn recreate(
+        &self,
+        slot_id: &str,
+        allocation: &ResourceAllocation,
+    ) -> Result<(), RuntimeError> {
+        let kind = Self::slot_kind(slot_id)?;
+        if self.exists(slot_id) {
+            self.remove_container(slot_id)?;
+        }
+        self.run_container(slot_id, kind, allocation)
+    }
+
+    fn ensure_running(
+        &self,
+        slot_id: &str,
+        allocation: &ResourceAllocation,
+    ) -> Result<(), RuntimeError> {
+        if !self.exists(slot_id) {
+            return self.recreate(slot_id, allocation);
+        }
+
+        if self.update_limits(slot_id, allocation).is_err() {
+            return self.recreate(slot_id, allocation);
+        }
+        let limits = self.inspect_limits(slot_id)?;
+        if !Self::limits_match(limits, allocation) {
+            return self.recreate(slot_id, allocation);
+        }
+        if !limits.running {
+            self.docker(&["start".to_owned(), Self::container_name(slot_id)])?;
+        }
+        let verified = self.inspect_limits(slot_id)?;
+        if !verified.running || !Self::limits_match(verified, allocation) {
+            return self.recreate(slot_id, allocation);
+        }
+        Ok(())
     }
 }
 
@@ -205,52 +438,14 @@ impl RuntimeAdapter for WslDockerRuntime {
     }
 
     fn start_slot(&self, slot: &SlotSummary) -> Result<(), RuntimeError> {
-        let name = Self::container_name(&slot.id);
-        if self.exists(&slot.id) {
-            self.docker(vec!["start".to_owned(), name])?;
-            return self.resize_slot(&slot.id, &slot.allocation);
-        }
-
-        let volume = format!("liaison_{}_data", slot.id.to_ascii_lowercase());
-        let mut args = vec![
-            "run".to_owned(),
-            "--detach".to_owned(),
-            "--name".to_owned(),
-            name,
-            "--restart".to_owned(),
-            if slot.kind == SlotKind::Persistent {
-                "unless-stopped"
-            } else {
-                "no"
-            }
-            .to_owned(),
-            "--cpus".to_owned(),
-            slot.allocation.cpu_threads.to_string(),
-            "--memory".to_owned(),
-            format!("{}m", slot.allocation.memory_mib),
-            "--label".to_owned(),
-            format!("liaison.slot={}", slot.id),
-            "--volume".to_owned(),
-            format!("{volume}:/workspace"),
-        ];
-        if slot.allocation.gpu != GpuAccess::None {
-            args.extend(["--gpus".to_owned(), "all".to_owned()]);
-        }
-        args.extend([
-            self.image_for(slot.kind).to_owned(),
-            "sh".to_owned(),
-            "-lc".to_owned(),
-            "trap : TERM INT; sleep infinity & wait".to_owned(),
-        ]);
-        self.docker(args)?;
-        Ok(())
+        self.ensure_running(&slot.id, &slot.allocation)
     }
 
     fn stop_slot(&self, slot_id: &str) -> Result<(), RuntimeError> {
         if !self.exists(slot_id) {
             return Ok(());
         }
-        self.docker(vec![
+        self.docker(&[
             "stop".to_owned(),
             "--time".to_owned(),
             "20".to_owned(),
@@ -264,18 +459,7 @@ impl RuntimeAdapter for WslDockerRuntime {
         slot_id: &str,
         allocation: &ResourceAllocation,
     ) -> Result<(), RuntimeError> {
-        if !self.exists(slot_id) {
-            return Err(RuntimeError::NotFound(slot_id.to_owned()));
-        }
-        self.docker(vec![
-            "update".to_owned(),
-            "--cpus".to_owned(),
-            allocation.cpu_threads.to_string(),
-            "--memory".to_owned(),
-            format!("{}m", allocation.memory_mib),
-            Self::container_name(slot_id),
-        ])?;
-        Ok(())
+        self.ensure_running(slot_id, allocation)
     }
 
     fn set_gpu_access(
@@ -283,19 +467,9 @@ impl RuntimeAdapter for WslDockerRuntime {
         slot: &SlotSummary,
         access: GpuAccess,
     ) -> Result<(), RuntimeError> {
-        let name = Self::container_name(&slot.id);
-        if self.exists(&slot.id) {
-            let _ = self.docker(vec![
-                "stop".to_owned(),
-                "--time".to_owned(),
-                "20".to_owned(),
-                name.clone(),
-            ]);
-            self.docker(vec!["rm".to_owned(), name])?;
-        }
-        let mut updated = slot.clone();
-        updated.allocation.gpu = access;
-        self.start_slot(&updated)
+        let mut updated = slot.allocation;
+        updated.gpu = access;
+        self.recreate(&slot.id, &updated)
     }
 
     fn collect_host_metrics(&self) -> HostMetrics {
@@ -348,6 +522,79 @@ impl RuntimeAdapter for WslDockerRuntime {
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
+
+    fn exec_workspace(
+        &self,
+        slot_id: &str,
+        command: &str,
+        working_directory: &str,
+    ) -> Result<RuntimeCommandOutput, RuntimeError> {
+        if Self::slot_kind(slot_id)? != SlotKind::Workspace {
+            return Err(RuntimeError::Unsupported(
+                "commands can only run in workspace slots".to_owned(),
+            ));
+        }
+        if !self.exists(slot_id) {
+            return Err(RuntimeError::NotFound(slot_id.to_owned()));
+        }
+        let output = self.docker_raw(&[
+            "exec".to_owned(),
+            "--workdir".to_owned(),
+            working_directory.to_owned(),
+            Self::container_name(slot_id),
+            "sh".to_owned(),
+            "-lc".to_owned(),
+            command.to_owned(),
+        ])?;
+        Ok(runtime_output(output))
+    }
+
+    fn stop_all(&self) -> Result<(), RuntimeError> {
+        let output = self.docker(&[
+            "ps".to_owned(),
+            "--all".to_owned(),
+            "--quiet".to_owned(),
+            "--filter".to_owned(),
+            "label=liaison.slot".to_owned(),
+        ])?;
+        for id in String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            self.docker(&[
+                "stop".to_owned(),
+                "--time".to_owned(),
+                "20".to_owned(),
+                id.to_owned(),
+            ])?;
+        }
+        Ok(())
+    }
+}
+
+fn runtime_output(output: Output) -> RuntimeCommandOutput {
+    let (stdout, stdout_truncated) = truncate_output(String::from_utf8_lossy(&output.stdout).into_owned());
+    let (stderr, stderr_truncated) = truncate_output(String::from_utf8_lossy(&output.stderr).into_owned());
+    RuntimeCommandOutput {
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+        truncated: stdout_truncated || stderr_truncated,
+    }
+}
+
+fn truncate_output(mut value: String) -> (String, bool) {
+    if value.len() <= COMMAND_OUTPUT_LIMIT {
+        return (value, false);
+    }
+    let mut end = COMMAND_OUTPUT_LIMIT;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value.push_str("\n… output truncated …\n");
+    (value, true)
 }
 
 fn bytes_to_mib(bytes: u64) -> u32 {
@@ -427,5 +674,22 @@ mod tests {
         assert!(runtime
             .resize_slot("W1", &ResourceAllocation::stopped())
             .is_err());
+    }
+
+    #[test]
+    fn mock_shutdown_stops_every_slot() {
+        let runtime = MockRuntime::new();
+        runtime.start_slot(&slot("W1")).unwrap();
+        runtime.start_slot(&slot("W2")).unwrap();
+        runtime.stop_all().unwrap();
+        assert!(runtime.exec_workspace("W1", "pwd", "/workspace").is_err());
+    }
+
+    #[test]
+    fn output_truncation_is_utf8_safe() {
+        let text = "あ".repeat(COMMAND_OUTPUT_LIMIT);
+        let (truncated, changed) = truncate_output(text);
+        assert!(changed);
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }
