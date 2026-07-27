@@ -27,18 +27,21 @@ find_connection_file() {
   return 1
 }
 
-if ! CONNECTION_FILE="$(find_connection_file "$CONNECTION_FILE")"; then
-  echo "liaison-client.json was not found." >&2
-  echo "Copy the file created by the server into this folder." >&2
-  exit 1
+RESOLVED_CONNECTION_FILE=""
+if RESOLVED_CONNECTION_FILE="$(find_connection_file "$CONNECTION_FILE")"; then
+  TRANSPORT="$(/usr/bin/plutil -extract transport raw -o - "$RESOLVED_CONNECTION_FILE" 2>/dev/null || true)"
+else
+  TRANSPORT="tailscale"
 fi
 
-TRANSPORT="$(/usr/bin/plutil -extract transport raw -o - "$CONNECTION_FILE" 2>/dev/null || true)"
-if [[ "$SKIP_DEPENDENCIES" != "1" && "$TRANSPORT" == "tailscale" ]]; then
+if [[ "$SKIP_DEPENDENCIES" != "1" && "$TRANSPORT" != "local" ]]; then
   if ! liaison_connect_tailscale 1 >/dev/null; then
-    echo "Tailscale sign-in is required for this server connection." >&2
-    exit 1
+    echo "Tailscale login was not completed. Liaison Client will still be installed." >&2
   fi
 fi
 
-exec /bin/bash "$SCRIPT_DIRECTORY/setup-client-macos.sh" "$CONNECTION_FILE"
+if [[ -n "$RESOLVED_CONNECTION_FILE" ]]; then
+  exec /bin/bash "$SCRIPT_DIRECTORY/setup-client-macos.sh" "$RESOLVED_CONNECTION_FILE"
+else
+  exec /bin/bash "$SCRIPT_DIRECTORY/setup-client-macos.sh"
+fi
