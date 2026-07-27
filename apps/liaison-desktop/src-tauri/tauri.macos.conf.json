@@ -4,7 +4,14 @@
   "app": {
     "windows": [
       {
-        "title": "Liaison Client"
+        "title": "Liaison Client",
+        "width": 1040,
+        "height": 720,
+        "minWidth": 800,
+        "minHeight": 560,
+        "center": true,
+        "decorations": true,
+        "transparent": false
       }
     ]
   },
