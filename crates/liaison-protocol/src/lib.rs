@@ -2,6 +2,7 @@ use liaison_core::{GpuAccess, OperatingMode, ResourceAllocation, SystemSnapshot}
 use serde::{Deserialize, Serialize};
 
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+pub const MAX_COMMAND_OUTPUT_BYTES: usize = 48 * 1024;
 pub const PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -10,6 +11,8 @@ pub struct Request {
     pub request_id: u64,
     pub token: String,
     pub command: Command,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_exec: Option<WorkspaceExecRequest>,
 }
 
 impl Request {
@@ -19,8 +22,30 @@ impl Request {
             request_id,
             token: token.into(),
             command,
+            workspace_exec: None,
         }
     }
+
+    pub fn workspace_exec(
+        request_id: u64,
+        token: impl Into<String>,
+        request: WorkspaceExecRequest,
+    ) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            token: token.into(),
+            command: Command::Health,
+            workspace_exec: Some(request),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceExecRequest {
+    pub slot_id: String,
+    pub command: String,
+    pub working_directory: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -98,7 +123,19 @@ impl Response {
 pub enum ResponseData {
     Health(HealthStatus),
     Snapshot(SystemSnapshot),
+    CommandOutput(CommandOutput),
     Ack,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandOutput {
+    pub slot_id: String,
+    pub command: String,
+    pub working_directory: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +167,22 @@ mod tests {
                     memory_mib: 8_192,
                     gpu: GpuAccess::Shared,
                 },
+            },
+        );
+        let json = serde_json::to_string(&request).unwrap();
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn workspace_request_round_trip_is_stable() {
+        let request = Request::workspace_exec(
+            9,
+            "0123456789abcdef",
+            WorkspaceExecRequest {
+                slot_id: "W1".to_owned(),
+                command: "pwd".to_owned(),
+                working_directory: "/workspace".to_owned(),
             },
         );
         let json = serde_json::to_string(&request).unwrap();
