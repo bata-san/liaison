@@ -1,13 +1,15 @@
 param(
     [string]$WslDistribution = "Ubuntu",
     [switch]$LocalOnly,
-    [switch]$SkipDependencyInstall
+    [switch]$SkipDependencyInstall,
+    [string]$LauncherLogPath,
+    [string]$InstallLogPath
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$LauncherLog = Join-Path $env:TEMP "LiaisonServerLauncher.log"
-$InstallLog = Join-Path $env:TEMP "LiaisonServerInstall.log"
+$LauncherLog = if ($LauncherLogPath) { $LauncherLogPath } else { Join-Path $env:TEMP "LiaisonServerLauncher.log" }
+$InstallLog = if ($InstallLogPath) { $InstallLogPath } else { Join-Path $env:TEMP "LiaisonServerInstall.log" }
 
 function Write-EarlyLog([string]$Message) {
     try {
@@ -24,27 +26,65 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-LiaisonShortPath([string]$Path) {
+    try {
+        if (-not ("LiaisonShortPath" -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+
+public static class LiaisonShortPath
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetShortPathName(
+        string longPath,
+        StringBuilder shortPath,
+        uint bufferLength);
+}
+'@
+        }
+
+        $buffer = New-Object Text.StringBuilder 1024
+        $length = [LiaisonShortPath]::GetShortPathName($Path, $buffer, [uint32]$buffer.Capacity)
+        if ($length -gt 0 -and $length -lt $buffer.Capacity) {
+            return $buffer.ToString()
+        }
+    } catch {
+        Write-EarlyLog ("Short-path conversion failed; using the quoted full path: " + $_.Exception.Message)
+    }
+
+    return $Path
+}
+
+function Quote-LiaisonProcessArgument([string]$Value) {
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
 Write-EarlyLog "PowerShell installer entered. Script: $PSCommandPath"
 
 if (-not (Test-Administrator)) {
     try {
-        # Start-Process joins ArgumentList values and can lose quoting around a -File
-        # path containing spaces or non-ASCII characters. Encode the entire elevated
-        # command so the script path reaches the administrator process unchanged.
-        $escapedScript = $PSCommandPath.Replace("'", "''")
-        $escapedDistribution = $WslDistribution.Replace("'", "''")
-        $command = "& '$escapedScript' -WslDistribution '$escapedDistribution'"
-        if ($LocalOnly) { $command += " -LocalOnly" }
-        if ($SkipDependencyInstall) { $command += " -SkipDependencyInstall" }
-        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-
-        Write-EarlyLog "Requesting administrator elevation with an encoded command."
-        $process = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @(
+        # Managed Windows environments commonly block -EncodedCommand. Use a normal
+        # -File launch instead. Prefer the DOS 8.3 path so spaces, Japanese text and
+        # parentheses cannot be reinterpreted by the elevated command line parser.
+        $elevationScript = Get-LiaisonShortPath $PSCommandPath
+        $argumentParts = @(
             "-NoLogo",
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
-            "-EncodedCommand", $encoded
+            "-File", (Quote-LiaisonProcessArgument $elevationScript),
+            "-WslDistribution", (Quote-LiaisonProcessArgument $WslDistribution),
+            "-LauncherLogPath", (Quote-LiaisonProcessArgument $LauncherLog),
+            "-InstallLogPath", (Quote-LiaisonProcessArgument $InstallLog)
         )
+        if ($LocalOnly) { $argumentParts += "-LocalOnly" }
+        if ($SkipDependencyInstall) { $argumentParts += "-SkipDependencyInstall" }
+        $argumentLine = $argumentParts -join " "
+
+        Write-EarlyLog "Requesting administrator elevation with a normal -File command."
+        Write-EarlyLog "Elevated script path: $elevationScript"
+        $process = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList $argumentLine
         Write-EarlyLog "Elevated installer exited with code $($process.ExitCode)."
         exit $process.ExitCode
     } catch {
