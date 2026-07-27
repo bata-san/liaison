@@ -12,13 +12,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Prepare Unicode parenthesized path
-        shell: powershell
+        shell: pwsh
         run: |
           $testRoot = Join-Path $PWD "launcher-test\科学部(生徒用)\liaison-server"
           $scripts = Join-Path $testRoot "scripts"
           New-Item -ItemType Directory -Force -Path $scripts | Out-Null
           Copy-Item "scripts\install-server-launcher.cmd" (Join-Path $testRoot "Install Liaison Server.cmd")
-          Set-Content -Path (Join-Path $scripts "install-server-bundle.ps1") -Value "exit 0" -Encoding UTF8
+          Set-Content -Path (Join-Path $scripts "install-server-bundle.ps1") -Value "exit 0" -Encoding utf8NoBOM
           Remove-Item (Join-Path $env:TEMP "LiaisonServerLauncher.log") -Force -ErrorAction SilentlyContinue
 
       - name: Run launcher from Unicode parenthesized path
@@ -29,7 +29,7 @@ jobs:
         run: call "Install Liaison Server.cmd"
 
       - name: Verify launcher result
-        shell: powershell
+        shell: pwsh
         run: |
           $launcherLog = Join-Path $env:TEMP "LiaisonServerLauncher.log"
           if (-not (Test-Path $launcherLog)) {
