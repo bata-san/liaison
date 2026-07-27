@@ -142,9 +142,9 @@ CLIENT_ADDRESS="127.0.0.1:$PORT"
 TAILSCALE_BIN="$(command -v tailscale 2>/dev/null || true)"
 
 if [[ "$LOCAL_ONLY" != "1" && -n "$TAILSCALE_BIN" ]]; then
-  TAILSCALE_IP="$("$TAILSCALE_BIN" ip -4 2>/dev/null | head -n 1 || true)"
+  TAILSCALE_IP="$(/usr/bin/sudo "$TAILSCALE_BIN" ip -4 2>/dev/null | head -n 1 || true)"
   if [[ -n "$TAILSCALE_IP" ]] \
-    && "$TAILSCALE_BIN" serve --yes --bg --tcp="$PORT" "tcp://127.0.0.1:$PORT" >/dev/null 2>&1; then
+    && /usr/bin/sudo "$TAILSCALE_BIN" serve --yes --bg --tcp="$PORT" "tcp://127.0.0.1:$PORT" >/dev/null 2>&1; then
     REMOTE_READY=0
     for _ in $(seq 1 20); do
       sleep 0.25
@@ -193,5 +193,5 @@ echo "Server address: $CLIENT_ADDRESS"
 echo "Transport: $TRANSPORT"
 echo "Pairing code: $PAIRING_CODE"
 echo "Connection file: $CONNECTION_FILE"
-echo "The server runs with Colima and tailscaled; no Docker Desktop or Tailscale GUI is required."
+echo "The server runs with Colima and the tailscaled system service; no Docker Desktop or Tailscale GUI is required."
 echo "Apple GPU assignment remains disabled for regular Docker workers."
