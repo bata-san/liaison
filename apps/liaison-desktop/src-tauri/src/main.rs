@@ -9,7 +9,7 @@ use std::{
 
 use liaison_client::{ClientError, LiaisonClient};
 use liaison_core::{GpuAccess, OperatingMode, ResourceAllocation, SystemSnapshot};
-use liaison_protocol::{Command, ResponseData};
+use liaison_protocol::{Command, CommandOutput, ResponseData};
 use tauri::State;
 
 const DEFAULT_PORT: u16 = 57_841;
@@ -230,6 +230,22 @@ fn release_gpu(state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
     )
 }
 
+#[tauri::command]
+fn run_workspace_command(
+    slot_id: String,
+    command: String,
+    working_directory: String,
+    state: State<'_, AppState>,
+) -> Result<CommandOutput, String> {
+    if command.trim().is_empty() {
+        return Err("実行するコマンドを入力してください。".to_owned());
+    }
+    let client = current_client(&state)?;
+    client
+        .exec_workspace(slot_id, command, working_directory)
+        .map_err(|error| connection_error(&client, error))
+}
+
 fn normalize_address(value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -315,7 +331,7 @@ fn connection_error(client: &LiaisonClient, error: ClientError) -> String {
         ),
         ClientError::Remote { code, message } if code.eq_ignore_ascii_case("unauthorized") => {
             format!(
-                "接続先 {address} には到達しましたが、接続トークンが一致しません。サーバーが生成したliaison-client.jsonのtokenを下の欄へ入力してください。詳細: {message}"
+                "接続先 {address} には到達しましたが、接続トークンが一致しません。サーバーが生成した接続トークンを入力してください。詳細: {message}"
             )
         }
         other => format!("接続先 {address}: {other}"),
@@ -346,6 +362,7 @@ fn main() {
             assign_worker,
             reserve_gpu,
             release_gpu,
+            run_workspace_command,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Liaison desktop application");
