@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 title Liaison Server Installer
 
-set "LIAISON_SCRIPT=%~dp0install-server-bundle.ps1"
+set "LIAISON_SCRIPT=%~dp0scripts\install-server-bundle.ps1"
 set "LIAISON_LAUNCH_LOG=%TEMP%\LiaisonServerLauncher.log"
 
 > "%LIAISON_LAUNCH_LOG%" echo [%DATE% %TIME%] CMD launcher started.
