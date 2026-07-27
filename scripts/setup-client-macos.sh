@@ -43,19 +43,14 @@ if [[ ! -d "$APP_SOURCE" || ! -f "$CLI_SOURCE" ]]; then
   exit 1
 fi
 
-if ! CONNECTION_FILE="$(find_connection_file "$CONNECTION_FILE")"; then
-  echo "liaison-client.json was not found." >&2
-  echo "Copy the file created by the server into this package folder and run again." >&2
-  exit 1
-fi
-
-ADDRESS="$(/usr/bin/plutil -extract address raw -o - "$CONNECTION_FILE" 2>/dev/null || true)"
-TOKEN="$(/usr/bin/plutil -extract token raw -o - "$CONNECTION_FILE" 2>/dev/null || true)"
-TRANSPORT="$(/usr/bin/plutil -extract transport raw -o - "$CONNECTION_FILE" 2>/dev/null || true)"
-SERVER_NAME="$(/usr/bin/plutil -extract server_name raw -o - "$CONNECTION_FILE" 2>/dev/null || true)"
-if [[ -z "$ADDRESS" || ${#TOKEN} -lt 16 ]]; then
-  echo "The connection file is invalid: $CONNECTION_FILE" >&2
-  exit 1
+RESOLVED_CONNECTION_FILE=""
+if RESOLVED_CONNECTION_FILE="$(find_connection_file "$CONNECTION_FILE")"; then
+  ADDRESS="$(/usr/bin/plutil -extract address raw -o - "$RESOLVED_CONNECTION_FILE" 2>/dev/null || true)"
+  TOKEN="$(/usr/bin/plutil -extract token raw -o - "$RESOLVED_CONNECTION_FILE" 2>/dev/null || true)"
+  if [[ -z "$ADDRESS" || ${#TOKEN} -lt 16 ]]; then
+    echo "Ignoring an invalid connection file: $RESOLVED_CONNECTION_FILE" >&2
+    RESOLVED_CONNECTION_FILE=""
+  fi
 fi
 
 echo "Installing Liaison Client for Apple silicon..."
@@ -63,37 +58,19 @@ mkdir -p "$HOME/Applications" "$TOOLS_DIRECTORY" "$CONFIG_DIRECTORY"
 rm -rf "$APP_DESTINATION"
 cp -R "$APP_SOURCE" "$APP_DESTINATION"
 cp "$CLI_SOURCE" "$TOOLS_DIRECTORY/liaison-cli"
-cp "$CONNECTION_FILE" "$CONFIG_PATH"
 chmod +x "$APP_DESTINATION/Contents/MacOS/liaison-desktop" "$TOOLS_DIRECTORY/liaison-cli"
 
-# Apply an ad-hoc local signature so the copied app bundle has a coherent signature.
+if [[ -n "$RESOLVED_CONNECTION_FILE" ]]; then
+  cp "$RESOLVED_CONNECTION_FILE" "$CONFIG_PATH"
+  chmod 600 "$CONFIG_PATH"
+  echo "Imported connection settings from: $RESOLVED_CONNECTION_FILE"
+else
+  echo "No connection file was supplied."
+  echo "Enter the pairing code or server IP and token inside Liaison Client."
+fi
+
 /usr/bin/codesign --force --deep --sign - "$APP_DESTINATION" >/dev/null 2>&1 || true
 
-echo "Checking Liaison Server..."
-echo "  Server: ${SERVER_NAME:-unknown}"
-echo "  Address: $ADDRESS"
-echo "  Transport: ${TRANSPORT:-unknown}"
-CONNECTION_OK=0
-if "$TOOLS_DIRECTORY/liaison-cli" --address "$ADDRESS" --token "$TOKEN" health >/dev/null 2>&1; then
-  CONNECTION_OK=1
-  echo "Connection: OK"
-else
-  echo "Connection: FAILED" >&2
-  if [[ "$ADDRESS" == 127.0.0.1:* || "$ADDRESS" == localhost:* ]]; then
-    echo "This connection file points to this Mac ($ADDRESS)." >&2
-    echo "Install or restart Liaison Server on this Mac." >&2
-    echo "When the server is another computer, copy liaison-client.json generated on that server." >&2
-  else
-    echo "The remote server did not respond at $ADDRESS." >&2
-    echo "Check that Liaison Server and Tailscale are running on both computers." >&2
-  fi
-fi
-
 echo "Installed: $APP_DESTINATION"
-echo "Configuration: $CONFIG_PATH"
 echo "Opening Liaison Client..."
 /usr/bin/open "$APP_DESTINATION"
-
-if [[ "$CONNECTION_OK" -ne 1 ]]; then
-  exit 2
-fi
