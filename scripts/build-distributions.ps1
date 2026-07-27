@@ -76,12 +76,29 @@ try {
     Copy-Item "scripts\setup-server.ps1" (Join-Path $ServerPackage "scripts")
     Copy-Item "scripts\install-server-bundle.ps1" (Join-Path $ServerPackage "scripts")
     Copy-Item "scripts\bootstrap-dependencies.ps1" (Join-Path $ServerPackage "scripts")
+    Copy-Item "scripts\repair-windows-server.ps1" (Join-Path $ServerPackage "scripts")
+    Copy-Item "scripts\start-server-windows.ps1" (Join-Path $ServerPackage "scripts")
     @'
 @echo off
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File ""%CD%\scripts\install-server-bundle.ps1""'"
-if errorlevel 1 pause
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-server-bundle.ps1"
+set LIAISON_EXIT=%ERRORLEVEL%
+echo.
+if not "%LIAISON_EXIT%"=="0" echo Liaison Server installation failed. Review the error above.
+echo Installation log: %TEMP%\LiaisonServerInstall.log
+echo Runtime logs: %ProgramData%\Liaison\logs
+pause
+exit /b %LIAISON_EXIT%
 '@ | Set-Content -Path (Join-Path $ServerPackage "Install Liaison Server.cmd") -Encoding ASCII
+    @'
+@echo off
+cd /d "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-server-windows.ps1"
+set LIAISON_EXIT=%ERRORLEVEL%
+echo.
+pause
+exit /b %LIAISON_EXIT%
+'@ | Set-Content -Path (Join-Path $ServerPackage "Start Liaison Server.cmd") -Encoding ASCII
     @'
 Liaison Server for Windows
 
@@ -91,9 +108,12 @@ Liaison Server for Windows
 4. Complete the one-time Tailscale browser login when prompted.
 5. Copy the displayed liaison:// pairing code into Liaison Client.
 
+The installer window now remains open and displays failures.
+Use Start Liaison Server.cmd to start the installed server and show diagnostics.
+Logs are stored in C:\ProgramData\Liaison\logs.
 Docker runs headlessly inside WSL. Docker Desktop is not required.
-Tailscale is installed silently and runs as a background service.
-The server stops Liaison-managed containers when it shuts down.
+Tailscale runs as a background service without opening its GUI.
+The control server starts before P1/P2. A container failure no longer terminates the server.
 '@ | Set-Content -Path (Join-Path $ServerPackage "README.txt") -Encoding ASCII
 
     Write-Step "Creating the Windows client package"
