@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use liaison_client::LiaisonClient;
+use liaison_client::{ClientError, LiaisonClient};
 use liaison_core::{GpuAccess, OperatingMode, ResourceAllocation, SystemSnapshot};
 use liaison_protocol::{Command, ResponseData};
 use tauri::State;
@@ -15,7 +15,7 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
         state
             .client
             .send(Command::Snapshot)
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| connection_error(&state.client, error))?,
     )
 }
 
@@ -131,6 +131,27 @@ fn release_gpu(state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
             .send(Command::ReleaseGpu)
             .map_err(|error| error.to_string())?,
     )
+}
+
+fn connection_error(client: &LiaisonClient, error: ClientError) -> String {
+    let address = client.address();
+    match error {
+        ClientError::Io(io_error) if io_error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            if address.starts_with("127.0.0.1:") || address.starts_with("localhost:") {
+                format!(
+                    "接続先 {address} でLiaison Serverが起動していません。このMacをサーバーにする場合はServer版を再セットアップしてください。別のPCがサーバーの場合は、そのサーバーで生成されたliaison-client.jsonを入れ直してください。"
+                )
+            } else {
+                format!(
+                    "接続先 {address} に拒否されました。サーバーの起動状態、Tailscale接続、liaison-client.jsonを確認してください。"
+                )
+            }
+        }
+        ClientError::Io(io_error) if io_error.kind() == std::io::ErrorKind::TimedOut => format!(
+            "接続先 {address} が応答しません。サーバーとTailscaleがオンラインか確認してください。"
+        ),
+        other => format!("接続先 {address}: {other}"),
+    }
 }
 
 fn snapshot_from(data: ResponseData) -> Result<SystemSnapshot, String> {
