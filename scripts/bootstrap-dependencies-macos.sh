@@ -56,7 +56,7 @@ liaison_tailscale_bin() {
 liaison_tailscale() {
   local binary
   binary="$(liaison_tailscale_bin)" || return 1
-  "$binary" "$@"
+  /usr/bin/sudo "$binary" "$@"
 }
 
 liaison_tailscale_ip() {
@@ -73,8 +73,8 @@ liaison_install_tailscale() {
     "$brew" install --formula tailscale
   fi
 
-  liaison_dependency_step "Starting the headless Tailscale service"
-  "$brew" services start tailscale >/dev/null
+  liaison_dependency_step "Starting the headless Tailscale system service"
+  /usr/bin/sudo "$brew" services start tailscale >/dev/null
   for _ in $(seq 1 30); do
     if liaison_tailscale status >/dev/null 2>&1; then
       return 0
