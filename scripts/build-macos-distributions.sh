@@ -19,7 +19,8 @@ if [[ "$SKIP_TESTS" != "1" ]]; then
   cargo test --workspace
 fi
 
-cargo build --release -p liaison-service -p liaison-cli -p liaison-desktop
+cargo build --release -p liaison-service -p liaison-cli
+npm --prefix apps/liaison-desktop run tauri:build -- --bundles app --ci
 
 SERVER_PACKAGE="$OUTPUT_DIRECTORY/liaison-server-macos-arm64"
 CLIENT_PACKAGE="$OUTPUT_DIRECTORY/liaison-client-macos-arm64"
@@ -27,15 +28,32 @@ SERVER_ZIP="$OUTPUT_DIRECTORY/liaison-server-macos-arm64.zip"
 CLIENT_ZIP="$OUTPUT_DIRECTORY/liaison-client-macos-arm64.zip"
 CLIENT_APP="$CLIENT_PACKAGE/Liaison Client.app"
 
+BUNDLED_APP=""
+for candidate in \
+  "$ROOT/target/release/bundle/macos/Liaison Client.app" \
+  "$ROOT/apps/liaison-desktop/src-tauri/target/release/bundle/macos/Liaison Client.app"; do
+  if [[ -d "$candidate" ]]; then
+    BUNDLED_APP="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$BUNDLED_APP" ]]; then
+  BUNDLED_APP="$(find "$ROOT" -path '*/target/release/bundle/macos/*.app' -type d -maxdepth 9 -print -quit 2>/dev/null || true)"
+fi
+
+if [[ -z "$BUNDLED_APP" || ! -d "$BUNDLED_APP" ]]; then
+  echo "The Tauri macOS application bundle was not found." >&2
+  exit 1
+fi
+
 rm -rf "$SERVER_PACKAGE" "$CLIENT_PACKAGE" "$SERVER_ZIP" "$CLIENT_ZIP"
 mkdir -p \
   "$SERVER_PACKAGE/bin" \
   "$SERVER_PACKAGE/scripts" \
   "$SERVER_PACKAGE/config" \
   "$CLIENT_PACKAGE/bin" \
-  "$CLIENT_PACKAGE/scripts" \
-  "$CLIENT_APP/Contents/MacOS" \
-  "$CLIENT_APP/Contents/Resources"
+  "$CLIENT_PACKAGE/scripts"
 
 cp target/release/liaison-service "$SERVER_PACKAGE/bin/liaison-service"
 cp target/release/liaison-cli "$SERVER_PACKAGE/bin/liaison-cli"
@@ -72,40 +90,9 @@ Not supported:
 - Apple GPU assignment to Docker containers
 README
 
-cp target/release/liaison-desktop "$CLIENT_APP/Contents/MacOS/liaison-desktop"
+/usr/bin/ditto "$BUNDLED_APP" "$CLIENT_APP"
 cp target/release/liaison-cli "$CLIENT_PACKAGE/bin/liaison-cli"
 cp scripts/setup-client-macos.sh "$CLIENT_PACKAGE/scripts/setup-client-macos.sh"
-
-cat > "$CLIENT_APP/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleDisplayName</key>
-  <string>Liaison Client</string>
-  <key>CFBundleExecutable</key>
-  <string>liaison-desktop</string>
-  <key>CFBundleIdentifier</key>
-  <string>dev.batasan.liaison</string>
-  <key>CFBundleInfoDictionaryVersion</key>
-  <string>6.0</string>
-  <key>CFBundleName</key>
-  <string>Liaison Client</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>0.2.0</string>
-  <key>CFBundleVersion</key>
-  <string>0.2.0</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>12.0</string>
-  <key>LSApplicationCategoryType</key>
-  <string>public.app-category.utilities</string>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-</dict>
-</plist>
-PLIST
 
 cat > "$CLIENT_PACKAGE/Install Liaison Client.command" <<'COMMAND'
 #!/bin/bash
@@ -123,7 +110,7 @@ Setup:
 3. Double-click "Install Liaison Client.command".
 4. Liaison Client is installed into ~/Applications and opened.
 
-This build is ad-hoc signed for local testing. On the first launch, macOS may ask you to confirm that the app should be opened.
+This package uses the official Tauri macOS application bundle. It is ad-hoc signed for local testing. On the first launch, macOS may ask you to confirm that the app should be opened.
 README
 
 chmod +x \
@@ -131,7 +118,6 @@ chmod +x \
   "$SERVER_PACKAGE/bin/liaison-cli" \
   "$SERVER_PACKAGE/scripts/setup-server-macos.sh" \
   "$SERVER_PACKAGE/Install Liaison Server.command" \
-  "$CLIENT_APP/Contents/MacOS/liaison-desktop" \
   "$CLIENT_PACKAGE/bin/liaison-cli" \
   "$CLIENT_PACKAGE/scripts/setup-client-macos.sh" \
   "$CLIENT_PACKAGE/Install Liaison Client.command"
