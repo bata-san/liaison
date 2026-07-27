@@ -58,7 +58,13 @@ public static class LiaisonShortPath
 }
 
 function Quote-LiaisonProcessArgument([string]$Value) {
-    return '"' + $Value.Replace('"', '\"') + '"'
+    if ($null -eq $Value) {
+        return '""'
+    }
+    if ($Value.Contains('"')) {
+        throw "A process argument contains an unsupported quote character."
+    }
+    return '"' + $Value + '"'
 }
 
 Write-EarlyLog "PowerShell installer entered. Script: $PSCommandPath"
