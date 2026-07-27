@@ -28,16 +28,24 @@ function Find-LiaisonConnectionFile([string]$RequestedPath) {
 }
 
 $resolved = Find-LiaisonConnectionFile $ConnectionFile
-if (-not $resolved) {
-    throw "liaison-client.json was not found. Copy the file created by the server into this folder."
+$connection = $null
+if ($resolved) {
+    try {
+        $connection = Get-Content $resolved -Raw | ConvertFrom-Json
+    } catch {
+        Write-Warning "The optional connection file could not be read."
+        $resolved = $null
+    }
 }
-$connection = Get-Content $resolved -Raw | ConvertFrom-Json
 
 Add-LiaisonToolPaths | Out-Null
-if (-not $SkipDependencyInstall -and ([string]$connection.transport) -eq "tailscale") {
-    $tailscaleIp = Connect-LiaisonTailscale -InstallIfMissing
-    if (-not $tailscaleIp) {
-        throw "Tailscale sign-in is required for this server connection. Sign in to Tailscale and run setup again."
+if (-not $SkipDependencyInstall) {
+    $needsTailscale = (-not $connection) -or ([string]$connection.transport) -eq "tailscale"
+    if ($needsTailscale) {
+        $tailscaleIp = Connect-LiaisonTailscale -InstallIfMissing
+        if (-not $tailscaleIp) {
+            Write-Warning "Tailscale login was not completed. Liaison Client will still be installed."
+        }
     }
 }
 
@@ -45,9 +53,11 @@ $arguments = @(
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
     "-File", (Join-Path $PSScriptRoot "setup-client.ps1"),
-    "-ConnectionFile", $resolved,
     "-SkipBuild"
 )
+if ($resolved) {
+    $arguments += @("-ConnectionFile", $resolved)
+}
 if ($NoLaunch) {
     $arguments += "-NoLaunch"
 }
