@@ -20,6 +20,21 @@ function normalizeAddress(value: string): string {
   return address;
 }
 
+function parsePairingCode(value: string): { address: string; token: string } | null {
+  const candidate = value.trim();
+  if (!candidate) return null;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== "liaison:" || url.hostname !== "connect") return null;
+    const address = normalizeAddress(url.searchParams.get("address") ?? "");
+    const token = (url.searchParams.get("token") ?? "").trim();
+    if (!address || token.length < 16) return null;
+    return { address, token };
+  } catch {
+    return null;
+  }
+}
+
 function setText(selector: string, value: string): void {
   const element = overlay?.querySelector<HTMLElement>(selector);
   if (element) element.textContent = value;
@@ -27,6 +42,24 @@ function setText(selector: string, value: string): void {
 
 function getInput(selector: string): HTMLInputElement | null {
   return overlay?.querySelector<HTMLInputElement>(selector) ?? null;
+}
+
+function applyPairingCode(showError = true): boolean {
+  const pairingInput = getInput("[data-connection-pairing]");
+  const addressInput = getInput("[data-connection-address]");
+  const tokenInput = getInput("[data-connection-token]");
+  if (!pairingInput || !addressInput || !tokenInput) return false;
+  const parsed = parsePairingCode(pairingInput.value);
+  if (!parsed) {
+    if (showError && pairingInput.value.trim()) {
+      setText("[data-connection-status]", "ペアリングコードの形式が正しくありません。");
+    }
+    return false;
+  }
+  addressInput.value = parsed.address;
+  tokenInput.value = parsed.token;
+  setText("[data-connection-status]", "ペアリングコードを読み込みました。");
+  return true;
 }
 
 function setBusy(busy: boolean): void {
@@ -70,6 +103,15 @@ function createOverlay(): HTMLElement {
       </div>
       <form class="connection-editor-form">
         <label>
+          <span>ペアリングコード</span>
+          <div class="connection-code-row">
+            <input data-connection-pairing type="text" autocomplete="off" spellcheck="false" placeholder="liaison://connect?address=..." />
+            <button data-apply-pairing type="button" class="connection-editor-small-button">読み込む</button>
+          </div>
+          <small>サーバーのセットアップ完了画面に表示された1行を貼り付けます。</small>
+        </label>
+        <div class="connection-divider"><span>または個別入力</span></div>
+        <label>
           <span>サーバーIP / ホスト名</span>
           <input data-connection-address type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="100.64.0.10 または server-name:57841" required />
           <small>ポートを省略すると ${DEFAULT_PORT} を使用します。</small>
@@ -95,6 +137,7 @@ function createOverlay(): HTMLElement {
   form?.addEventListener("submit", (event) => {
     event.preventDefault();
     void (async () => {
+      applyPairingCode(false);
       const addressInput = getInput("[data-connection-address]");
       const tokenInput = getInput("[data-connection-token]");
       if (!addressInput || !tokenInput) return;
@@ -103,7 +146,7 @@ function createOverlay(): HTMLElement {
       const token = tokenInput.value.trim();
       addressInput.value = address;
       if (!address || token.length < 16) {
-        setText("[data-connection-status]", "IPと16文字以上の接続トークンを入力してください。");
+        setText("[data-connection-status]", "ペアリングコード、またはIPと16文字以上の接続トークンを入力してください。");
         return;
       }
 
@@ -122,11 +165,16 @@ function createOverlay(): HTMLElement {
     })();
   });
 
+  element.querySelector<HTMLButtonElement>("[data-apply-pairing]")?.addEventListener("click", () => {
+    applyPairingCode(true);
+  });
+  element.querySelector<HTMLInputElement>("[data-connection-pairing]")?.addEventListener("paste", () => {
+    window.setTimeout(() => applyPairingCode(false), 0);
+  });
   element.querySelector<HTMLButtonElement>("[data-retry-connection]")?.addEventListener("click", () => {
     setText("[data-connection-status]", "現在の設定で再接続しています…");
     retryReactConnection();
   });
-
   element.querySelector<HTMLButtonElement>("[data-toggle-token]")?.addEventListener("click", (event) => {
     const tokenInput = getInput("[data-connection-token]");
     const button = event.currentTarget as HTMLButtonElement;
