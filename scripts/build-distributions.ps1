@@ -87,12 +87,13 @@ Liaison Server for Windows
 
 1. Extract this ZIP.
 2. Double-click Install Liaison Server.cmd.
-3. The installer downloads official Tailscale and Docker Desktop installers when needed.
-4. Complete the Tailscale and Docker first-run screens when they appear.
-5. Copy liaison-client.json from the desktop into a client package.
+3. Restart Windows only when WSL is enabled for the first time.
+4. Complete the one-time Tailscale browser login when prompted.
+5. Copy the displayed liaison:// pairing code into Liaison Client.
 
-A restart may be required when WSL is enabled for the first time.
-Docker Desktop terms apply. Do not use Docker Desktop commercially without the required subscription.
+Docker runs headlessly inside WSL. Docker Desktop is not required.
+Tailscale is installed silently and runs as a background service.
+The server stops Liaison-managed containers when it shuts down.
 '@ | Set-Content -Path (Join-Path $ServerPackage "README.txt") -Encoding ASCII
 
     Write-Step "Creating the Windows client package"
@@ -112,10 +113,13 @@ if errorlevel 1 pause
 Liaison Client for Windows
 
 1. Extract this ZIP.
-2. Copy liaison-client.json from the server into this folder.
-3. Double-click Install Liaison Client.cmd.
-4. Tailscale is downloaded from the official package server when the connection requires it.
-5. Complete Tailscale sign-in when prompted.
+2. Double-click Install Liaison Client.cmd.
+3. Complete the one-time Tailscale browser login when prompted.
+4. Open Liaison Client and paste the server pairing code.
+
+A liaison-client.json file is optional. The app saves connection settings itself.
+Worker management and the workspace terminal are integrated into Liaison Client.
+Tailscale runs as a background service without opening its GUI.
 '@ | Set-Content -Path (Join-Path $ClientPackage "README.txt") -Encoding ASCII
 
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
