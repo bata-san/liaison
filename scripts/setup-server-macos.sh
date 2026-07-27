@@ -15,6 +15,7 @@ LOG_DIRECTORY="$CONFIG_DIRECTORY/logs"
 LAUNCH_AGENT="$HOME/Library/LaunchAgents/dev.batasan.liaison.server.plist"
 CONNECTION_FILE="$HOME/Desktop/liaison-client.json"
 LABEL="dev.batasan.liaison.server"
+SERVICE_PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This installer must be run on macOS." >&2
@@ -29,6 +30,8 @@ if [[ ! -f "$SERVER_SOURCE" || ! -f "$CLI_SOURCE" || ! -f "$CONFIG_TEMPLATE" ]];
   echo "The Liaison Server package is incomplete." >&2
   exit 1
 fi
+
+export PATH="$SERVICE_PATH"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker was not found. Install and start Docker Desktop first." >&2
@@ -80,6 +83,15 @@ cat > "$LAUNCH_AGENT" <<PLIST
     <string>--config</string>
     <string>$CONFIG_PATH</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$SERVICE_PATH</string>
+    <key>HOME</key>
+    <string>$HOME</string>
+    <key>TAILSCALE_BE_CLI</key>
+    <string>1</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -108,8 +120,9 @@ for _ in $(seq 1 40); do
   fi
 done
 if [[ "$READY" -ne 1 ]]; then
-  echo "The server did not pass its health check." >&2
+  echo "The server did not pass its local health check." >&2
   echo "See: $LOG_DIRECTORY/server-error.log" >&2
+  /bin/launchctl print "gui/$UID/$LABEL" 2>/dev/null | tail -n 30 >&2 || true
   exit 1
 fi
 
@@ -122,18 +135,36 @@ elif [[ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]]; then
   TAILSCALE_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 fi
 
+run_tailscale() {
+  TAILSCALE_BE_CLI=1 "$TAILSCALE_BIN" "$@"
+}
+
 if [[ -n "$TAILSCALE_BIN" ]]; then
-  TAILSCALE_IP="$($TAILSCALE_BIN ip -4 2>/dev/null | head -n 1 || true)"
-  if [[ -n "$TAILSCALE_IP" ]] && "$TAILSCALE_BIN" serve --bg --tcp="$PORT" "tcp://127.0.0.1:$PORT" >/dev/null 2>&1; then
-    TRANSPORT="tailscale"
-    CLIENT_ADDRESS="$TAILSCALE_IP:$PORT"
-    echo "Tailscale access configured: $CLIENT_ADDRESS"
+  TAILSCALE_IP="$(run_tailscale ip -4 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$TAILSCALE_IP" ]] \
+    && run_tailscale serve --yes --bg --tcp="$PORT" "tcp://127.0.0.1:$PORT" >/dev/null 2>&1; then
+    REMOTE_READY=0
+    for _ in $(seq 1 20); do
+      sleep 0.25
+      if "$BIN_DIRECTORY/liaison-cli" --address "$TAILSCALE_IP:$PORT" --token "$TOKEN" health >/dev/null 2>&1; then
+        REMOTE_READY=1
+        break
+      fi
+    done
+    if [[ "$REMOTE_READY" -eq 1 ]]; then
+      TRANSPORT="tailscale"
+      CLIENT_ADDRESS="$TAILSCALE_IP:$PORT"
+      echo "Tailscale access configured and verified: $CLIENT_ADDRESS"
+    else
+      echo "Warning: Tailscale forwarding was configured but did not pass the health check." >&2
+      echo "The generated connection file is valid only on this Mac." >&2
+    fi
   else
     echo "Warning: Tailscale TCP forwarding could not be configured." >&2
-    echo "The server will remain available only on this Mac." >&2
+    echo "The generated connection file is valid only on this Mac." >&2
   fi
 else
-  echo "Warning: Tailscale was not detected. The server is local-only." >&2
+  echo "Warning: Tailscale was not detected. The generated connection file is valid only on this Mac." >&2
 fi
 
 SERVER_NAME="$(/bin/hostname -s | /usr/bin/tr -cd 'A-Za-z0-9._-')"
@@ -151,6 +182,12 @@ chmod 600 "$CONFIG_PATH" "$CONNECTION_FILE"
 echo ""
 echo "Server setup completed."
 echo "Server address: $CLIENT_ADDRESS"
+echo "Transport: $TRANSPORT"
 echo "Client connection file: $CONNECTION_FILE"
-echo "Copy liaison-client.json into the Apple silicon client package."
+if [[ "$TRANSPORT" == "tailscale" ]]; then
+  echo "Copy liaison-client.json into the client package."
+else
+  echo "This connection file works only when the client runs on this same Mac."
+  echo "For another computer, connect Tailscale and run this installer again."
+fi
 echo "Apple GPU assignment is disabled; CPU, memory, and Docker workers are available."
