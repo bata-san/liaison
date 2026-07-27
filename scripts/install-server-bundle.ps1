@@ -6,7 +6,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
+$LauncherLog = Join-Path $env:TEMP "LiaisonServerLauncher.log"
 $InstallLog = Join-Path $env:TEMP "LiaisonServerInstall.log"
+
+function Write-EarlyLog([string]$Message) {
+    try {
+        $line = "{0} {1}" -f ([DateTimeOffset]::Now.ToString("o")), $Message
+        Add-Content -Path $LauncherLog -Value $line -Encoding UTF8
+    } catch {
+        # Logging must never prevent setup from continuing.
+    }
+}
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -14,31 +24,56 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-if (-not (Test-Administrator)) {
-    $arguments = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", "`"$PSCommandPath`"",
-        "-WslDistribution", "`"$WslDistribution`""
-    )
-    if ($LocalOnly) { $arguments += "-LocalOnly" }
-    if ($SkipDependencyInstall) { $arguments += "-SkipDependencyInstall" }
-    $process = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList $arguments
-    exit $process.ExitCode
-}
+Write-EarlyLog "PowerShell installer entered. Script: $PSCommandPath"
 
-. (Join-Path $PSScriptRoot "bootstrap-dependencies.ps1")
+if (-not (Test-Administrator)) {
+    try {
+        # Start-Process joins ArgumentList values and can lose quoting around a -File
+        # path containing spaces or non-ASCII characters. Encode the entire elevated
+        # command so the script path reaches the administrator process unchanged.
+        $escapedScript = $PSCommandPath.Replace("'", "''")
+        $escapedDistribution = $WslDistribution.Replace("'", "''")
+        $command = "& '$escapedScript' -WslDistribution '$escapedDistribution'"
+        if ($LocalOnly) { $command += " -LocalOnly" }
+        if ($SkipDependencyInstall) { $command += " -SkipDependencyInstall" }
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+
+        Write-EarlyLog "Requesting administrator elevation with an encoded command."
+        $process = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @(
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-EncodedCommand", $encoded
+        )
+        Write-EarlyLog "Elevated installer exited with code $($process.ExitCode)."
+        exit $process.ExitCode
+    } catch {
+        Write-EarlyLog ("Administrator elevation failed: " + $_.Exception.Message)
+        Write-Host "Administrator elevation failed." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host "Launcher log: $LauncherLog"
+        exit 1
+    }
+}
 
 $transcriptStarted = $false
-try {
-    Start-Transcript -Path $InstallLog -Append | Out-Null
-    $transcriptStarted = $true
-} catch {
-    Write-Warning "Installation transcript could not be started: $($_.Exception.Message)"
-}
-
 $exitCode = 0
 try {
+    Write-EarlyLog "Administrator installer started."
+    try {
+        Start-Transcript -Path $InstallLog -Append | Out-Null
+        $transcriptStarted = $true
+    } catch {
+        Write-EarlyLog ("Installation transcript could not be started: " + $_.Exception.Message)
+        Write-Warning "Installation transcript could not be started: $($_.Exception.Message)"
+    }
+
+    $bootstrapPath = Join-Path $PSScriptRoot "bootstrap-dependencies.ps1"
+    if (-not (Test-Path $bootstrapPath)) {
+        throw "Dependency bootstrap script is missing: $bootstrapPath"
+    }
+    . $bootstrapPath
+
     Add-LiaisonToolPaths | Out-Null
 
     if (-not $SkipDependencyInstall) {
@@ -77,6 +112,9 @@ try {
     # started later by the resilient host script, so an image pull or container
     # failure cannot terminate the Liaison control service.
     $templatePath = Join-Path $Root "config\liaison.example.json"
+    if (-not (Test-Path $templatePath)) {
+        throw "Configuration template is missing: $templatePath"
+    }
     $template = Get-Content $templatePath -Raw | ConvertFrom-Json
     if ($template.PSObject.Properties.Name -contains "persistent_autostart") {
         $template.persistent_autostart = $false
@@ -90,6 +128,7 @@ try {
     )
 
     $setupArguments = @(
+        "-NoLogo",
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", (Join-Path $PSScriptRoot "setup-server.ps1"),
@@ -110,17 +149,21 @@ try {
 
     Write-Host ""
     Write-Host "Liaison Server installation completed." -ForegroundColor Green
+    Write-Host "Launcher log: $LauncherLog"
     Write-Host "Installation log: $InstallLog"
     Write-Host "Runtime logs: $env:ProgramData\Liaison\logs"
     $pairingPath = Join-Path $env:USERPROFILE "Desktop\Liaison Pairing Code.txt"
     if (Test-Path $pairingPath) {
         Write-Host "Pairing code: $pairingPath"
     }
+    Write-EarlyLog "Installation completed successfully."
 } catch {
     $exitCode = 1
+    Write-EarlyLog ("Installation failed: " + $_.Exception.Message)
     Write-Host ""
     Write-Host "Liaison Server installation failed." -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "Launcher log: $LauncherLog"
     Write-Host "Installation log: $InstallLog"
     Write-Host "Runtime logs: $env:ProgramData\Liaison\logs"
 } finally {
