@@ -7,7 +7,10 @@ use std::{
     time::Duration,
 };
 
-use liaison_protocol::{Command, Request, Response, ResponseData, MAX_MESSAGE_BYTES};
+use liaison_protocol::{
+    Command, CommandOutput, Request, Response, ResponseData, WorkspaceExecRequest,
+    MAX_MESSAGE_BYTES,
+};
 use thiserror::Error;
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -53,15 +56,50 @@ impl LiaisonClient {
 
     pub fn send(&self, command: Command) -> Result<ResponseData, ClientError> {
         let request_id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-        let request = Request::new(request_id, self.token.clone(), command);
+        self.send_request(
+            Request::new(request_id, self.token.clone(), command),
+            self.timeout,
+        )
+    }
+
+    pub fn exec_workspace(
+        &self,
+        slot_id: impl Into<String>,
+        command: impl Into<String>,
+        working_directory: impl Into<String>,
+    ) -> Result<CommandOutput, ClientError> {
+        let request_id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let request = Request::workspace_exec(
+            request_id,
+            self.token.clone(),
+            WorkspaceExecRequest {
+                slot_id: slot_id.into(),
+                command: command.into(),
+                working_directory: working_directory.into(),
+            },
+        );
+        match self.send_request(request, Duration::from_secs(60))? {
+            ResponseData::CommandOutput(output) => Ok(output),
+            _ => Err(ClientError::Protocol(
+                "workspace request returned an unexpected response".to_owned(),
+            )),
+        }
+    }
+
+    fn send_request(
+        &self,
+        request: Request,
+        timeout: Duration,
+    ) -> Result<ResponseData, ClientError> {
+        let request_id = request.request_id;
         let address = self
             .address
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| ClientError::Protocol("address did not resolve".to_owned()))?;
-        let mut stream = TcpStream::connect_timeout(&address, self.timeout)?;
-        stream.set_read_timeout(Some(self.timeout))?;
-        stream.set_write_timeout(Some(self.timeout))?;
+        let mut stream = TcpStream::connect_timeout(&address, timeout)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         let mut payload = serde_json::to_vec(&request)?;
         payload.push(b'\n');
         stream.write_all(&payload)?;
@@ -195,6 +233,38 @@ mod tests {
         let client = LiaisonClient::new(address.to_string(), "0123456789abcdef");
         let data = client.send(Command::Health).unwrap();
         assert!(matches!(data, ResponseData::Health(_)));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn workspace_request_returns_output() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: Request = serde_json::from_str(&line).unwrap();
+            assert!(request.workspace_exec.is_some());
+            let response = Response::success(
+                request.request_id,
+                ResponseData::CommandOutput(CommandOutput {
+                    slot_id: "W1".to_owned(),
+                    command: "pwd".to_owned(),
+                    working_directory: "/workspace".to_owned(),
+                    exit_code: 0,
+                    stdout: "/workspace\n".to_owned(),
+                    stderr: String::new(),
+                    truncated: false,
+                }),
+            );
+            writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+        });
+        let client = LiaisonClient::new(address.to_string(), "0123456789abcdef");
+        let output = client.exec_workspace("W1", "pwd", "/workspace").unwrap();
+        assert_eq!(output.stdout, "/workspace\n");
         server.join().unwrap();
     }
 }
