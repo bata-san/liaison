@@ -22,6 +22,8 @@ jobs:
             "scripts/setup-server.ps1",
             "scripts/setup-client.ps1",
             "scripts/start-client.ps1",
+            "scripts/repair-windows-server.ps1",
+            "scripts/start-server-windows.ps1",
             "scripts/build-distributions.ps1"
           )
           $messages = @()
