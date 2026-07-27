@@ -78,22 +78,11 @@ try {
     Copy-Item "scripts\bootstrap-dependencies.ps1" (Join-Path $ServerPackage "scripts")
     Copy-Item "scripts\repair-windows-server.ps1" (Join-Path $ServerPackage "scripts")
     Copy-Item "scripts\start-server-windows.ps1" (Join-Path $ServerPackage "scripts")
+    Copy-Item "scripts\install-server-launcher.cmd" (Join-Path $ServerPackage "Install Liaison Server.cmd")
     @'
 @echo off
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-server-bundle.ps1"
-set LIAISON_EXIT=%ERRORLEVEL%
-echo.
-if not "%LIAISON_EXIT%"=="0" echo Liaison Server installation failed. Review the error above.
-echo Installation log: %TEMP%\LiaisonServerInstall.log
-echo Runtime logs: %ProgramData%\Liaison\logs
-pause
-exit /b %LIAISON_EXIT%
-'@ | Set-Content -Path (Join-Path $ServerPackage "Install Liaison Server.cmd") -Encoding ASCII
-    @'
-@echo off
-cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-server-windows.ps1"
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-server-windows.ps1"
 set LIAISON_EXIT=%ERRORLEVEL%
 echo.
 pause
@@ -102,15 +91,18 @@ exit /b %LIAISON_EXIT%
     @'
 Liaison Server for Windows
 
-1. Extract this ZIP.
+1. Extract this ZIP completely before running it.
 2. Double-click Install Liaison Server.cmd.
-3. Restart Windows only when WSL is enabled for the first time.
-4. Complete the one-time Tailscale browser login when prompted.
-5. Copy the displayed liaison:// pairing code into Liaison Client.
+3. Approve the administrator prompt.
+4. Restart Windows only when WSL is enabled for the first time.
+5. Complete the one-time Tailscale browser login when prompted.
+6. Copy the displayed liaison:// pairing code into Liaison Client.
 
-The installer window now remains open and displays failures.
+The installer window always pauses before closing.
+The launcher creates %TEMP%\LiaisonServerLauncher.log before PowerShell starts.
+The installation transcript is %TEMP%\LiaisonServerInstall.log.
 Use Start Liaison Server.cmd to start the installed server and show diagnostics.
-Logs are stored in C:\ProgramData\Liaison\logs.
+Runtime logs are stored in C:\ProgramData\Liaison\logs.
 Docker runs headlessly inside WSL. Docker Desktop is not required.
 Tailscale runs as a background service without opening its GUI.
 The control server starts before P1/P2. A container failure no longer terminates the server.
@@ -126,7 +118,7 @@ The control server starts before P1/P2. A container failure no longer terminates
     @'
 @echo off
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-client-bundle.ps1"
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-client-bundle.ps1"
 if errorlevel 1 pause
 '@ | Set-Content -Path (Join-Path $ClientPackage "Install Liaison Client.cmd") -Encoding ASCII
     @'
