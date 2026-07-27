@@ -21,12 +21,15 @@ jobs:
           Set-Content -Path (Join-Path $scripts "install-server-bundle.ps1") -Value "exit 0" -Encoding UTF8
 
           $launcherLog = Join-Path $env:TEMP "LiaisonServerLauncher.log"
-          Remove-Item $launcherLog -Force -ErrorAction SilentlyContinue
+          $outputLog = Join-Path $env:RUNNER_TEMP "launcher-output.txt"
+          Remove-Item $launcherLog, $outputLog -Force -ErrorAction SilentlyContinue
           $env:LIAISON_LAUNCHER_TEST = "1"
           Push-Location $testRoot
           try {
-            & ".\Install Liaison Server.cmd"
+            $launcherOutput = & ".\Install Liaison Server.cmd" 2>&1
             $launcherExitCode = $LASTEXITCODE
+            $launcherOutput | Out-File -FilePath $outputLog -Encoding UTF8
+            $launcherOutput | ForEach-Object { Write-Host $_ }
           } finally {
             Pop-Location
             Remove-Item Env:LIAISON_LAUNCHER_TEST -ErrorAction SilentlyContinue
@@ -46,3 +49,13 @@ jobs:
           if (-not (Select-String -Path $launcherLog -SimpleMatch "PowerShell exited with code 0." -Quiet)) {
             throw "Launcher did not record a successful PowerShell exit."
           }
+
+      - name: Upload launcher diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-launcher-path-diagnostics
+          path: |
+            ${{ runner.temp }}\LiaisonServerLauncher.log
+            ${{ runner.temp }}\launcher-output.txt
+          if-no-files-found: warn
