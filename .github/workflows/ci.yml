@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  windows-validation:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate PowerShell setup scripts
+        shell: powershell
+        run: |
+          $files = @(
+            "scripts/bootstrap-dependencies.ps1",
+            "scripts/install-server-bundle.ps1",
+            "scripts/install-client-bundle.ps1",
+            "scripts/setup-server.ps1",
+            "scripts/setup-client.ps1",
+            "scripts/start-client.ps1",
+            "scripts/build-distributions.ps1"
+          )
+          $messages = @()
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            foreach ($parseError in $errors) {
+              $messages += "$file`:$($parseError.Extent.StartLineNumber):$($parseError.Extent.StartColumnNumber) $($parseError.Message)"
+            }
+          }
+          if ($messages.Count -gt 0) {
+            $messages | ForEach-Object { Write-Host $_ }
+            exit 1
+          }
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend dependencies
+        working-directory: apps/liaison-desktop
+        run: npm install
+
+      - name: Build frontend
+        working-directory: apps/liaison-desktop
+        run: npm run build
+
+      - name: Test core scheduler
+        run: cargo test -p liaison-core
+
+      - name: Test protocol
+        run: cargo test -p liaison-protocol
+
+      - name: Test client
+        run: cargo test -p liaison-client
+
+      - name: Test runtime adapters
+        run: cargo test -p liaison-runtime
+
+      - name: Test service orchestration
+        run: cargo test -p liaison-service
+
+      - name: Check desktop Rust bridge
+        run: cargo check -p liaison-desktop
+
+      - name: Build Windows binaries
+        run: cargo build -p liaison-service -p liaison-cli -p liaison-desktop
+
+      - name: Run end-to-end smoke test
+        shell: powershell
+        run: .\scripts\smoke-test.ps1 -SkipBuild
+
+      - name: Build release binaries
+        run: cargo build --release -p liaison-service -p liaison-cli -p liaison-desktop
+
+      - name: Package server and client distributions
+        shell: powershell
+        run: .\scripts\build-distributions.ps1 -SkipBuild -SkipTests
+
+      - name: Upload release distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: liaison-windows-release
+          path: |
+            dist/liaison-server-windows.zip
+            dist/liaison-client-windows.zip
+          if-no-files-found: error
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: liaison-windows-debug
+          path: |
+            target/debug/liaison-service.exe
+            target/debug/liaison-cli.exe
+            target/debug/liaison-desktop.exe
+          if-no-files-found: error
+
+  macos-apple-silicon:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate macOS setup scripts
+        run: |
+          bash -n scripts/bootstrap-dependencies-macos.sh
+          bash -n scripts/install-server-bundle-macos.sh
+          bash -n scripts/install-client-bundle-macos.sh
+          bash -n scripts/setup-server-macos.sh
+          bash -n scripts/setup-client-macos.sh
+          bash -n scripts/build-macos-distributions.sh
+          chmod +x scripts/*.sh
+
+      - name: Verify Apple silicon runner
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend dependencies
+        working-directory: apps/liaison-desktop
+        run: npm install
+
+      - name: Build frontend
+        working-directory: apps/liaison-desktop
+        run: npm run build
+
+      - name: Test Rust workspace on Apple silicon
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee macos-rust-test.log
+
+      - name: Upload Apple silicon Rust test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: liaison-macos-rust-test-log
+          path: macos-rust-test.log
+          if-no-files-found: warn
+
+      - name: Build and package Apple silicon distributions
+        env:
+          SKIP_TESTS: "1"
+        run: ./scripts/build-macos-distributions.sh
+
+      - name: Upload Apple silicon distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: liaison-macos-apple-silicon
+          path: |
+            dist/liaison-server-macos-arm64.zip
+            dist/liaison-client-macos-arm64.zip
+          if-no-files-found: error

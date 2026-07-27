@@ -1,0 +1,12 @@
+[package]
+name = "liaison-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+liaison-client.workspace = true
+liaison-core.workspace = true
+liaison-protocol.workspace = true
+serde_json.workspace = true
