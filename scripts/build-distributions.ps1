@@ -28,29 +28,21 @@ try {
     if (-not $SkipBuild) {
         Write-Step "Building the frontend"
         npm --prefix apps/liaison-desktop install
-        if ($LASTEXITCODE -ne 0) {
-            throw "npm install failed."
-        }
+        if ($LASTEXITCODE -ne 0) { throw "npm install failed." }
         npm --prefix apps/liaison-desktop run build
-        if ($LASTEXITCODE -ne 0) {
-            throw "The frontend build failed."
-        }
+        if ($LASTEXITCODE -ne 0) { throw "The frontend build failed." }
     }
 
     if (-not $SkipTests) {
         Write-Step "Running tests"
         cargo test --workspace
-        if ($LASTEXITCODE -ne 0) {
-            throw "Rust tests failed."
-        }
+        if ($LASTEXITCODE -ne 0) { throw "Rust tests failed." }
     }
 
     if (-not $SkipBuild) {
         Write-Step "Building release binaries"
         cargo build --release -p liaison-service -p liaison-cli -p liaison-desktop
-        if ($LASTEXITCODE -ne 0) {
-            throw "The release build failed."
-        }
+        if ($LASTEXITCODE -ne 0) { throw "The release build failed." }
     }
 
     $RequiredBinaries = @(
@@ -59,13 +51,11 @@ try {
         "target\release\liaison-desktop.exe"
     )
     foreach ($binary in $RequiredBinaries) {
-        if (-not (Test-Path $binary)) {
-            throw "A release binary is missing: $binary"
-        }
+        if (-not (Test-Path $binary)) { throw "A release binary is missing: $binary" }
     }
 
-    $ServerPackage = Join-Path $OutputDirectory "liaison-server"
-    $ClientPackage = Join-Path $OutputDirectory "liaison-client"
+    $ServerPackage = Join-Path $OutputDirectory "liaison-server-windows"
+    $ClientPackage = Join-Path $OutputDirectory "liaison-client-windows"
     $ServerZip = Join-Path $OutputDirectory "liaison-server-windows.zip"
     $ClientZip = Join-Path $OutputDirectory "liaison-client-windows.zip"
 
@@ -79,41 +69,56 @@ try {
         (Join-Path $ClientPackage "bin"), `
         (Join-Path $ClientPackage "scripts") | Out-Null
 
-    Write-Step "Creating the server package"
+    Write-Step "Creating the Windows server package"
     Copy-Item "target\release\liaison-service.exe" (Join-Path $ServerPackage "bin")
     Copy-Item "target\release\liaison-cli.exe" (Join-Path $ServerPackage "bin")
-    Copy-Item "scripts\setup-server.ps1" (Join-Path $ServerPackage "scripts")
     Copy-Item "config\liaison.example.json" (Join-Path $ServerPackage "config")
+    Copy-Item "scripts\setup-server.ps1" (Join-Path $ServerPackage "scripts")
+    Copy-Item "scripts\install-server-bundle.ps1" (Join-Path $ServerPackage "scripts")
+    Copy-Item "scripts\bootstrap-dependencies.ps1" (Join-Path $ServerPackage "scripts")
     @'
-Liaison Server
+@echo off
+cd /d "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File ""%CD%\scripts\install-server-bundle.ps1""'"
+if errorlevel 1 pause
+'@ | Set-Content -Path (Join-Path $ServerPackage "Install Liaison Server.cmd") -Encoding ASCII
+    @'
+Liaison Server for Windows
 
-1. Extract this ZIP on the server PC.
-2. Open PowerShell as Administrator in the extracted folder.
-3. Run:
+1. Extract this ZIP.
+2. Double-click Install Liaison Server.cmd.
+3. The installer downloads official Tailscale and Docker Desktop installers when needed.
+4. Complete the Tailscale and Docker first-run screens when they appear.
+5. Copy liaison-client.json from the desktop into a client package.
 
-   powershell -ExecutionPolicy Bypass -File .\scripts\setup-server.ps1
+A restart may be required when WSL is enabled for the first time.
+Docker Desktop terms apply. Do not use Docker Desktop commercially without the required subscription.
+'@ | Set-Content -Path (Join-Path $ServerPackage "README.txt") -Encoding ASCII
 
-The setup creates liaison-client.json on the desktop.
-Copy that JSON file into the extracted client package folder.
-'@ | Set-Content -Path (Join-Path $ServerPackage "README.txt") -Encoding UTF8
-
-    Write-Step "Creating the client package"
+    Write-Step "Creating the Windows client package"
     Copy-Item "target\release\liaison-desktop.exe" (Join-Path $ClientPackage "bin")
     Copy-Item "target\release\liaison-cli.exe" (Join-Path $ClientPackage "bin")
     Copy-Item "scripts\setup-client.ps1" (Join-Path $ClientPackage "scripts")
     Copy-Item "scripts\start-client.ps1" (Join-Path $ClientPackage "scripts")
+    Copy-Item "scripts\install-client-bundle.ps1" (Join-Path $ClientPackage "scripts")
+    Copy-Item "scripts\bootstrap-dependencies.ps1" (Join-Path $ClientPackage "scripts")
     @'
-Liaison Client
+@echo off
+cd /d "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-client-bundle.ps1"
+if errorlevel 1 pause
+'@ | Set-Content -Path (Join-Path $ClientPackage "Install Liaison Client.cmd") -Encoding ASCII
+    @'
+Liaison Client for Windows
 
-1. Extract this ZIP on the client PC.
+1. Extract this ZIP.
 2. Copy liaison-client.json from the server into this folder.
-3. Open a normal PowerShell window and run:
+3. Double-click Install Liaison Client.cmd.
+4. Tailscale is downloaded from the official package server when the connection requires it.
+5. Complete Tailscale sign-in when prompted.
+'@ | Set-Content -Path (Join-Path $ClientPackage "README.txt") -Encoding ASCII
 
-   powershell -ExecutionPolicy Bypass -File .\scripts\setup-client.ps1
-
-After setup, open Liaison Client from the desktop or Start menu.
-'@ | Set-Content -Path (Join-Path $ClientPackage "README.txt") -Encoding UTF8
-
+    New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
     Compress-Archive -Path (Join-Path $ServerPackage "*") -DestinationPath $ServerZip -CompressionLevel Optimal
     Compress-Archive -Path (Join-Path $ClientPackage "*") -DestinationPath $ClientZip -CompressionLevel Optimal
 
