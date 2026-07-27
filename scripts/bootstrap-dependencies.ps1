@@ -115,7 +115,7 @@ function Get-LiaisonWslDistributions {
         return @()
     }
     $items = & wsl.exe --list --quiet 2>$null
-    return @($items | ForEach-Object { ([string]$_).Replace([char]0, "").Trim() } | Where-Object { $_ })
+    return @($items | ForEach-Object { (([string]$_) -replace "\x00", "").Trim() } | Where-Object { $_ })
 }
 
 function Invoke-LiaisonWslRoot {
