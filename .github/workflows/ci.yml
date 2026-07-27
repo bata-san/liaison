@@ -16,6 +16,9 @@ jobs:
         shell: powershell
         run: |
           $files = @(
+            "scripts/bootstrap-dependencies.ps1",
+            "scripts/install-server-bundle.ps1",
+            "scripts/install-client-bundle.ps1",
             "scripts/setup-server.ps1",
             "scripts/setup-client.ps1",
             "scripts/start-client.ps1",
@@ -114,10 +117,13 @@ jobs:
 
       - name: Validate macOS setup scripts
         run: |
+          bash -n scripts/bootstrap-dependencies-macos.sh
+          bash -n scripts/install-server-bundle-macos.sh
+          bash -n scripts/install-client-bundle-macos.sh
           bash -n scripts/setup-server-macos.sh
           bash -n scripts/setup-client-macos.sh
           bash -n scripts/build-macos-distributions.sh
-          chmod +x scripts/setup-server-macos.sh scripts/setup-client-macos.sh scripts/build-macos-distributions.sh
+          chmod +x scripts/*.sh
 
       - name: Verify Apple silicon runner
         run: test "$(uname -m)" = "arm64"
