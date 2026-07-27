@@ -8,14 +8,6 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "bootstrap-dependencies.ps1")
 
-function Get-LiaisonWslDistributions {
-    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-        return @()
-    }
-    $items = & wsl.exe --list --quiet 2>$null
-    return @($items | ForEach-Object { ([string]$_).Replace([char]0, "").Trim() } | Where-Object { $_ })
-}
-
 Add-LiaisonToolPaths | Out-Null
 
 if (-not $SkipDependencyInstall) {
@@ -36,14 +28,7 @@ if (-not $SkipDependencyInstall) {
         & wsl.exe -d $WslDistribution -u root -- sh -lc "true"
     }
 
-    Install-LiaisonDockerDesktop | Out-Null
-    Add-LiaisonToolPaths | Out-Null
-
-    Write-LiaisonDependencyStep "Checking Docker access inside WSL"
-    & wsl.exe -d $WslDistribution -- docker version --format '{{.Server.Version}}' *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Docker Desktop is running, but WSL integration for '$WslDistribution' is not enabled. Open Docker Desktop Settings > Resources > WSL Integration, enable it, and run setup again."
-    }
+    Install-LiaisonDockerEngineInWsl -Distribution $WslDistribution
 
     if (-not $LocalOnly) {
         $tailscaleIp = Connect-LiaisonTailscale -InstallIfMissing
