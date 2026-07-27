@@ -42,6 +42,10 @@ impl LiaisonClient {
         )
     }
 
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
