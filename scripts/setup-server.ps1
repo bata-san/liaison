@@ -46,7 +46,7 @@ function New-RandomToken {
 
 function Get-WslDistributions {
     $items = & wsl.exe --list --quiet 2>$null
-    return @($items | ForEach-Object { ([string]$_).Replace([char]0, "").Trim() } | Where-Object { $_ })
+    return @($items | ForEach-Object { (([string]$_) -replace "\x00", "").Trim() } | Where-Object { $_ })
 }
 
 function Start-WslDocker([string]$Distribution) {
