@@ -12,6 +12,8 @@ use liaison_core::{GpuAccess, OperatingMode, ResourceAllocation, SystemSnapshot}
 use liaison_protocol::{Command, ResponseData};
 use tauri::State;
 
+const DEFAULT_PORT: u16 = 57_841;
+
 struct AppState {
     client: Mutex<LiaisonClient>,
 }
@@ -70,9 +72,8 @@ fn save_connection(
 
     let path = client_config_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!("接続設定フォルダーを作成できませんでした: {error}")
-        })?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("接続設定フォルダーを作成できませんでした: {error}"))?;
     }
 
     let mut value = fs::read_to_string(&path)
@@ -80,30 +81,22 @@ fn save_connection(
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| serde_json::json!({}));
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "接続設定をJSONオブジェクトとして作成できませんでした。".to_owned())?;
-    object.insert("version".to_owned(), serde_json::json!(1));
-    object.insert("server_name".to_owned(), serde_json::json!("manual"));
-    object.insert("address".to_owned(), serde_json::json!(address));
-    object.insert("token".to_owned(), serde_json::json!(token));
-    object.insert("transport".to_owned(), serde_json::json!("manual"));
+    {
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| "接続設定をJSONオブジェクトとして作成できませんでした。".to_owned())?;
+        object.insert("version".to_owned(), serde_json::json!(1));
+        object.insert("server_name".to_owned(), serde_json::json!("manual"));
+        object.insert("address".to_owned(), serde_json::json!(address.clone()));
+        object.insert("token".to_owned(), serde_json::json!(token.clone()));
+        object.insert("transport".to_owned(), serde_json::json!("manual"));
+    }
 
     let json = serde_json::to_string_pretty(&value)
         .map_err(|error| format!("接続設定をJSONへ変換できませんでした: {error}"))?;
     fs::write(&path, format!("{json}\n"))
         .map_err(|error| format!("接続設定を書き込めませんでした: {error}"))?;
 
-    let address = object
-        .get("address")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("127.0.0.1:57841")
-        .to_owned();
-    let token = object
-        .get("token")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
     let mut client = state
         .client
         .lock()
@@ -245,6 +238,16 @@ fn normalize_address(value: &str) -> Result<String, String> {
     if value.parse::<SocketAddr>().is_ok() {
         return Ok(value.to_owned());
     }
+    if value.starts_with('[') && value.ends_with(']') {
+        let candidate = format!("{value}:{DEFAULT_PORT}");
+        if candidate.parse::<SocketAddr>().is_ok() {
+            return Ok(candidate);
+        }
+    }
+    if !value.contains(':') {
+        return Ok(format!("{value}:{DEFAULT_PORT}"));
+    }
+
     let (host, port) = value.rsplit_once(':').ok_or_else(|| {
         "接続先は IP:ポート または ホスト名:ポート の形式で入力してください。".to_owned()
     })?;
@@ -260,7 +263,7 @@ fn normalize_address(value: &str) -> Result<String, String> {
     if port == 0 {
         return Err("ポート番号は1〜65535で入力してください。".to_owned());
     }
-    Ok(format!("{}:{}", host.trim(), port))
+    Ok(format!("{}:{port}", host.trim()))
 }
 
 fn client_config_path() -> Result<PathBuf, String> {
@@ -310,6 +313,11 @@ fn connection_error(client: &LiaisonClient, error: ClientError) -> String {
         ClientError::Io(io_error) if io_error.kind() == std::io::ErrorKind::TimedOut => format!(
             "接続先 {address} が応答しません。サーバーとTailscaleがオンラインか確認してください。"
         ),
+        ClientError::Remote { code, message } if code.eq_ignore_ascii_case("unauthorized") => {
+            format!(
+                "接続先 {address} には到達しましたが、接続トークンが一致しません。サーバーが生成したliaison-client.jsonのtokenを下の欄へ入力してください。詳細: {message}"
+            )
+        }
         other => format!("接続先 {address}: {other}"),
     }
 }
