@@ -60,20 +60,22 @@ function New-Shortcut(
     $shortcut.Save()
 }
 
-Write-Step "Checking the client connection file"
 $ResolvedConnectionFile = Find-ConnectionFile $ConnectionFile
-if (-not $ResolvedConnectionFile) {
-    throw "liaison-client.json was not found. Run setup-server.ps1 on the server and copy the generated JSON into the client package folder."
+$Connection = $null
+if ($ResolvedConnectionFile) {
+    Write-Step "Checking the optional client connection file"
+    try {
+        $candidate = Get-Content $ResolvedConnectionFile -Raw | ConvertFrom-Json
+        if ($candidate.address -and $candidate.token -and ([string]$candidate.token).Length -ge 16) {
+            $Connection = $candidate
+            Write-Host "Connection settings found: $($Connection.address)" -ForegroundColor Green
+        } else {
+            Write-Warning "The connection file is invalid and will be ignored."
+        }
+    } catch {
+        Write-Warning "The connection file could not be read and will be ignored."
+    }
 }
-
-$Connection = Get-Content $ResolvedConnectionFile -Raw | ConvertFrom-Json
-if (-not $Connection.address) {
-    throw "The connection file does not contain an address: $ResolvedConnectionFile"
-}
-if (-not $Connection.token -or ([string]$Connection.token).Length -lt 16) {
-    throw "The connection token is invalid: $ResolvedConnectionFile"
-}
-Write-Host "Server: $($Connection.address)" -ForegroundColor Green
 
 Push-Location $Root
 try {
@@ -91,17 +93,11 @@ try {
         Require-Command "npm.cmd" "Install Node.js 22 or newer."
         if (-not $SkipBuild) {
             npm --prefix apps/liaison-desktop install
-            if ($LASTEXITCODE -ne 0) {
-                throw "npm install failed."
-            }
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed." }
             npm --prefix apps/liaison-desktop run build
-            if ($LASTEXITCODE -ne 0) {
-                throw "The frontend build failed."
-            }
+            if ($LASTEXITCODE -ne 0) { throw "The frontend build failed." }
             cargo build --release -p liaison-desktop -p liaison-cli
-            if ($LASTEXITCODE -ne 0) {
-                throw "The client release build failed."
-            }
+            if ($LASTEXITCODE -ne 0) { throw "The client release build failed." }
         }
         $SourceClient = Join-Path $Root "target\release\liaison-desktop.exe"
         $SourceCli = Join-Path $Root "target\release\liaison-cli.exe"
@@ -122,19 +118,22 @@ try {
     Copy-Item $SourceCli $CliExe -Force
     Copy-Item (Join-Path $PSScriptRoot "start-client.ps1") $LauncherPath -Force
 
-    $SavedConnection = [ordered]@{
-        version = 1
-        server_name = [string]$Connection.server_name
-        address = [string]$Connection.address
-        token = [string]$Connection.token
-        transport = [string]$Connection.transport
-        installed_at = [DateTimeOffset]::Now.ToString("o")
+    if ($Connection) {
+        $SavedConnection = [ordered]@{
+            version = 1
+            server_name = [string]$Connection.server_name
+            address = [string]$Connection.address
+            token = [string]$Connection.token
+            transport = [string]$Connection.transport
+            pairing_code = [string]$Connection.pairing_code
+            installed_at = [DateTimeOffset]::Now.ToString("o")
+        }
+        [IO.File]::WriteAllText(
+            $ClientConfigPath,
+            ($SavedConnection | ConvertTo-Json -Depth 5),
+            [Text.UTF8Encoding]::new($false)
+        )
     }
-    [IO.File]::WriteAllText(
-        $ClientConfigPath,
-        ($SavedConnection | ConvertTo-Json -Depth 5),
-        [Text.UTF8Encoding]::new($false)
-    )
 
     Write-Step "Creating shortcuts"
     $StartMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Liaison Client.lnk"
@@ -144,17 +143,21 @@ try {
         New-Shortcut $DesktopShortcut $LauncherPath $InstallDirectory $ClientExe
     }
 
-    Write-Step "Checking the server connection"
-    & $CliExe --address ([string]$Connection.address) --token ([string]$Connection.token) health
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "The client was installed, but the server could not be reached. Check the server, Tailscale, and Windows Firewall."
+    if ($Connection) {
+        Write-Step "Checking the server connection"
+        & $CliExe --address ([string]$Connection.address) --token ([string]$Connection.token) health
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "The saved connection did not respond. Edit it inside Liaison Client."
+        } else {
+            Write-Host "Connection: OK" -ForegroundColor Green
+        }
     } else {
-        Write-Host "Connection: OK" -ForegroundColor Green
+        Write-Host "No connection settings were imported." -ForegroundColor Yellow
+        Write-Host "Enter a pairing code or server IP and token inside Liaison Client."
     }
 
     Write-Host "`nClient setup completed." -ForegroundColor Green
     Write-Host "Open 'Liaison Client' from the desktop or Start menu."
-    Write-Host "Client configuration: $ClientConfigPath"
 
     if (-not $NoLaunch) {
         & $LauncherPath
