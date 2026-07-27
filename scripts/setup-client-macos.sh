@@ -51,6 +51,8 @@ fi
 
 ADDRESS="$(/usr/bin/plutil -extract address raw -o - "$CONNECTION_FILE" 2>/dev/null || true)"
 TOKEN="$(/usr/bin/plutil -extract token raw -o - "$CONNECTION_FILE" 2>/dev/null || true)"
+TRANSPORT="$(/usr/bin/plutil -extract transport raw -o - "$CONNECTION_FILE" 2>/dev/null || true)"
+SERVER_NAME="$(/usr/bin/plutil -extract server_name raw -o - "$CONNECTION_FILE" 2>/dev/null || true)"
 if [[ -z "$ADDRESS" || ${#TOKEN} -lt 16 ]]; then
   echo "The connection file is invalid: $CONNECTION_FILE" >&2
   exit 1
@@ -67,15 +69,31 @@ chmod +x "$APP_DESTINATION/Contents/MacOS/liaison-desktop" "$TOOLS_DIRECTORY/lia
 # Apply an ad-hoc local signature so the copied app bundle has a coherent signature.
 /usr/bin/codesign --force --deep --sign - "$APP_DESTINATION" >/dev/null 2>&1 || true
 
-echo "Checking the server connection at $ADDRESS..."
-if "$TOOLS_DIRECTORY/liaison-cli" --address "$ADDRESS" --token "$TOKEN" health >/dev/null; then
+echo "Checking Liaison Server..."
+echo "  Server: ${SERVER_NAME:-unknown}"
+echo "  Address: $ADDRESS"
+echo "  Transport: ${TRANSPORT:-unknown}"
+CONNECTION_OK=0
+if "$TOOLS_DIRECTORY/liaison-cli" --address "$ADDRESS" --token "$TOKEN" health >/dev/null 2>&1; then
+  CONNECTION_OK=1
   echo "Connection: OK"
 else
-  echo "Warning: the client was installed, but the server is not reachable." >&2
-  echo "Check the server, Tailscale, and the connection file." >&2
+  echo "Connection: FAILED" >&2
+  if [[ "$ADDRESS" == 127.0.0.1:* || "$ADDRESS" == localhost:* ]]; then
+    echo "This connection file points to this Mac ($ADDRESS)." >&2
+    echo "Install or restart Liaison Server on this Mac." >&2
+    echo "When the server is another computer, copy liaison-client.json generated on that server." >&2
+  else
+    echo "The remote server did not respond at $ADDRESS." >&2
+    echo "Check that Liaison Server and Tailscale are running on both computers." >&2
+  fi
 fi
 
 echo "Installed: $APP_DESTINATION"
 echo "Configuration: $CONFIG_PATH"
 echo "Opening Liaison Client..."
 /usr/bin/open "$APP_DESTINATION"
+
+if [[ "$CONNECTION_OK" -ne 1 ]]; then
+  exit 2
+fi
