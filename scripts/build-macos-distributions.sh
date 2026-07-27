@@ -41,7 +41,6 @@ done
 if [[ -z "$BUNDLED_APP" ]]; then
   BUNDLED_APP="$(find "$ROOT" -path '*/target/release/bundle/macos/*.app' -type d -maxdepth 9 -print -quit 2>/dev/null || true)"
 fi
-
 if [[ -z "$BUNDLED_APP" || ! -d "$BUNDLED_APP" ]]; then
   echo "The Tauri macOS application bundle was not found." >&2
   exit 1
@@ -57,69 +56,71 @@ mkdir -p \
 
 cp target/release/liaison-service "$SERVER_PACKAGE/bin/liaison-service"
 cp target/release/liaison-cli "$SERVER_PACKAGE/bin/liaison-cli"
-cp scripts/setup-server-macos.sh "$SERVER_PACKAGE/scripts/setup-server-macos.sh"
 cp config/liaison.example.json "$SERVER_PACKAGE/config/liaison.example.json"
+cp scripts/setup-server-macos.sh "$SERVER_PACKAGE/scripts/setup-server-macos.sh"
+cp scripts/install-server-bundle-macos.sh "$SERVER_PACKAGE/scripts/install-server-bundle-macos.sh"
+cp scripts/bootstrap-dependencies-macos.sh "$SERVER_PACKAGE/scripts/bootstrap-dependencies-macos.sh"
 
 cat > "$SERVER_PACKAGE/Install Liaison Server.command" <<'COMMAND'
 #!/bin/bash
 set -e
 cd "$(dirname "$0")"
-exec /bin/bash ./scripts/setup-server-macos.sh
+/bin/bash ./scripts/install-server-bundle-macos.sh
+printf '\nPress Return to close.\n'
+read -r _
 COMMAND
 
 cat > "$SERVER_PACKAGE/README.txt" <<'README'
-Liaison Server for Apple silicon
+Liaison Server for Apple silicon Mac
 
-Requirements:
-- Apple silicon Mac
-- Docker Desktop running
-- Tailscale when connecting from another computer
-
-Setup:
 1. Extract this ZIP.
-2. Double-click "Install Liaison Server.command".
-3. When setup completes, copy liaison-client.json from the Desktop to a client package.
+2. Double-click Install Liaison Server.command.
+3. The installer downloads the official Tailscale and Docker Desktop installers when needed.
+4. Complete the macOS approval, Tailscale sign-in, and Docker first-run screens.
+5. Copy liaison-client.json from the Desktop into a client package.
 
-Supported on Mac server:
-- CPU and memory allocation
-- Persistent and workspace Docker containers
-- Automatic host sizing
-- Tailscale private TCP access
-
-Not supported:
-- Apple GPU assignment to Docker containers
+Apple GPU assignment is not supported. CPU, memory, and Docker workers are supported.
+Docker Desktop terms apply. Commercial use may require a paid Docker subscription.
 README
 
 /usr/bin/ditto "$BUNDLED_APP" "$CLIENT_APP"
 cp target/release/liaison-cli "$CLIENT_PACKAGE/bin/liaison-cli"
 cp scripts/setup-client-macos.sh "$CLIENT_PACKAGE/scripts/setup-client-macos.sh"
+cp scripts/install-client-bundle-macos.sh "$CLIENT_PACKAGE/scripts/install-client-bundle-macos.sh"
+cp scripts/bootstrap-dependencies-macos.sh "$CLIENT_PACKAGE/scripts/bootstrap-dependencies-macos.sh"
 
 cat > "$CLIENT_PACKAGE/Install Liaison Client.command" <<'COMMAND'
 #!/bin/bash
 set -e
 cd "$(dirname "$0")"
-exec /bin/bash ./scripts/setup-client-macos.sh
+/bin/bash ./scripts/install-client-bundle-macos.sh
+printf '\nPress Return to close.\n'
+read -r _
 COMMAND
 
 cat > "$CLIENT_PACKAGE/README.txt" <<'README'
-Liaison Client for Apple silicon
+Liaison Client for Apple silicon Mac
 
-Setup:
 1. Extract this ZIP.
 2. Copy liaison-client.json from the server into this folder.
-3. Double-click "Install Liaison Client.command".
-4. Liaison Client is installed into ~/Applications and opened.
+3. Double-click Install Liaison Client.command.
+4. The installer downloads Tailscale from the official package server when required.
+5. Complete Tailscale sign-in when prompted.
 
-This package uses the official Tauri macOS application bundle. It is ad-hoc signed for local testing. On the first launch, macOS may ask you to confirm that the app should be opened.
+The Liaison app is installed into ~/Applications.
 README
 
 chmod +x \
   "$SERVER_PACKAGE/bin/liaison-service" \
   "$SERVER_PACKAGE/bin/liaison-cli" \
   "$SERVER_PACKAGE/scripts/setup-server-macos.sh" \
+  "$SERVER_PACKAGE/scripts/install-server-bundle-macos.sh" \
+  "$SERVER_PACKAGE/scripts/bootstrap-dependencies-macos.sh" \
   "$SERVER_PACKAGE/Install Liaison Server.command" \
   "$CLIENT_PACKAGE/bin/liaison-cli" \
   "$CLIENT_PACKAGE/scripts/setup-client-macos.sh" \
+  "$CLIENT_PACKAGE/scripts/install-client-bundle-macos.sh" \
+  "$CLIENT_PACKAGE/scripts/bootstrap-dependencies-macos.sh" \
   "$CLIENT_PACKAGE/Install Liaison Client.command"
 
 /usr/bin/codesign --force --deep --sign - "$CLIENT_APP"
