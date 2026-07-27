@@ -43,6 +43,6 @@ jobs:
           if (-not (Test-Path $launcherLog)) {
             throw "Launcher log was not created."
           }
-          if (-not (Select-String -Path $launcherLog -SimpleMatch "Launcher path test succeeded." -Quiet)) {
-            throw "Launcher did not complete its path test."
+          if (-not (Select-String -Path $launcherLog -SimpleMatch "PowerShell exited with code 0." -Quiet)) {
+            throw "Launcher did not record a successful PowerShell exit."
           }
