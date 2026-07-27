@@ -45,24 +45,39 @@ function Get-LiaisonTailscaleIPv4 {
 function Install-LiaisonTailscale {
     $existing = Get-LiaisonTailscaleExe
     if ($existing) {
+        Set-Service -Name Tailscale -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name Tailscale -ErrorAction SilentlyContinue
         return $existing
     }
 
-    Write-LiaisonDependencyStep "Installing Tailscale from the official package server"
+    Write-LiaisonDependencyStep "Installing the Tailscale background service"
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $index = Invoke-WebRequest -UseBasicParsing -Uri "https://pkgs.tailscale.com/stable/"
-    $matches = [regex]::Matches($index.Content, 'href="(tailscale-setup-full-[0-9.]+\.exe)"')
+    $matches = [regex]::Matches($index.Content, 'href="(tailscale-setup-[0-9.]+-amd64\.msi)"')
     if ($matches.Count -eq 0) {
-        throw "The current Tailscale installer could not be located on the official package server."
+        throw "The current Tailscale MSI could not be located on the official package server."
     }
     $name = $matches[$matches.Count - 1].Groups[1].Value
     $temporary = Join-Path ([IO.Path]::GetTempPath()) $name
     Invoke-WebRequest -UseBasicParsing -Uri ("https://pkgs.tailscale.com/stable/" + $name) -OutFile $temporary
-    Start-Process -FilePath $temporary -Wait
 
+    $arguments = @(
+        "/i", "`"$temporary`"",
+        "/qn", "/norestart",
+        "TS_NOLAUNCH=1",
+        "TS_UNATTENDEDMODE=always",
+        "TS_ONBOARDING_FLOW=hide"
+    )
+    $process = Start-Process -FilePath msiexec.exe -Wait -PassThru -ArgumentList $arguments
+    if ($process.ExitCode -notin @(0, 3010)) {
+        throw "Tailscale MSI installation failed with exit code $($process.ExitCode)."
+    }
+
+    Set-Service -Name Tailscale -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name Tailscale -ErrorAction SilentlyContinue
     $installed = Get-LiaisonTailscaleExe
     if (-not $installed) {
-        throw "Tailscale installation did not complete. Install Tailscale and run this setup again."
+        throw "Tailscale installation did not complete."
     }
     return $installed
 }
@@ -78,17 +93,16 @@ function Connect-LiaisonTailscale {
         return $null
     }
 
+    Set-Service -Name Tailscale -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name Tailscale -ErrorAction SilentlyContinue
     $ip = Get-LiaisonTailscaleIPv4
     if ($ip) {
         return $ip
     }
 
-    Write-LiaisonDependencyStep "Connecting Tailscale"
-    $gui = Join-Path (Split-Path -Parent $tailscale) "tailscale-ipn.exe"
-    if (Test-Path $gui) {
-        Start-Process -FilePath $gui -ErrorAction SilentlyContinue
-    }
-    & $tailscale up
+    Write-LiaisonDependencyStep "Connecting the Tailscale background service"
+    Write-Host "A browser login page may open once. Complete the login and return here."
+    & $tailscale up --unattended=true
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Tailscale sign-in was not completed."
         return $null
@@ -96,75 +110,94 @@ function Connect-LiaisonTailscale {
     return Get-LiaisonTailscaleIPv4
 }
 
-function Get-LiaisonDockerExe {
-    $command = Get-Command docker.exe -ErrorAction SilentlyContinue
-    if ($command) {
-        return $command.Source
+function Get-LiaisonWslDistributions {
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        return @()
     }
-    $candidates = @(
-        "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe",
-        "$env:LOCALAPPDATA\Programs\Docker\Docker\resources\bin\docker.exe"
+    $items = & wsl.exe --list --quiet 2>$null
+    return @($items | ForEach-Object { ([string]$_).Replace([char]0, "").Trim() } | Where-Object { $_ })
+}
+
+function Invoke-LiaisonWslRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Distribution,
+        [Parameter(Mandatory = $true)][string]$Script
     )
-    foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) {
-            return $candidate
-        }
-    }
-    return $null
-}
-
-function Start-LiaisonDockerDesktop {
-    $candidates = @(
-        "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
-        "$env:LOCALAPPDATA\Programs\Docker\Docker\Docker Desktop.exe"
-    )
-    foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) {
-            Start-Process -FilePath $candidate -ErrorAction SilentlyContinue
-            return
-        }
+    & wsl.exe -d $Distribution -u root -- sh -lc $Script
+    if ($LASTEXITCODE -ne 0) {
+        throw "A root command failed inside WSL distribution '$Distribution'."
     }
 }
 
-function Wait-LiaisonDocker {
-    param([int]$TimeoutSeconds = 180)
+function Start-LiaisonWslDocker {
+    param([Parameter(Mandatory = $true)][string]$Distribution)
 
-    $docker = Get-LiaisonDockerExe
-    if (-not $docker) {
-        return $false
-    }
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        & $docker info *> $null
-        if ($LASTEXITCODE -eq 0) {
-            return $true
-        }
-        Start-Sleep -Seconds 2
-    }
-    return $false
+    Invoke-LiaisonWslRoot -Distribution $Distribution -Script @'
+set -eu
+if docker info >/dev/null 2>&1; then
+  exit 0
+fi
+if command -v service >/dev/null 2>&1; then
+  service docker start >/dev/null 2>&1 || true
+fi
+if ! docker info >/dev/null 2>&1; then
+  mkdir -p /var/log
+  nohup dockerd > /var/log/liaison-dockerd.log 2>&1 &
+fi
+for i in $(seq 1 60); do
+  docker info >/dev/null 2>&1 && exit 0
+  sleep 1
+done
+exit 1
+'@
 }
 
-function Install-LiaisonDockerDesktop {
-    $docker = Get-LiaisonDockerExe
-    if (-not $docker) {
-        Write-LiaisonDependencyStep "Installing Docker Desktop from Docker"
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $installer = Join-Path ([IO.Path]::GetTempPath()) "Docker Desktop Installer.exe"
-        Invoke-WebRequest -UseBasicParsing -Uri "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe" -OutFile $installer
-        Start-Process -FilePath $installer -Wait -ArgumentList "install"
-    }
+function Test-LiaisonWslDocker {
+    param([Parameter(Mandatory = $true)][string]$Distribution)
+    & wsl.exe -d $Distribution -- docker version --format '{{.Server.Version}}' *> $null
+    return $LASTEXITCODE -eq 0
+}
 
-    Start-LiaisonDockerDesktop
-    if (-not (Wait-LiaisonDocker)) {
-        throw "Docker Desktop is installed but not ready. Start Docker Desktop, complete its first-run prompts, and run setup again."
+function Install-LiaisonDockerEngineInWsl {
+    param([Parameter(Mandatory = $true)][string]$Distribution)
+
+    Write-LiaisonDependencyStep "Installing Docker Engine inside WSL"
+    Invoke-LiaisonWslRoot -Distribution $Distribution -Script @'
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y ca-certificates curl
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+. /etc/os-release
+cat > /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+'@
+
+    $defaultUser = (& wsl.exe -d $Distribution -- sh -lc 'id -un' 2>$null | Select-Object -First 1)
+    if ($defaultUser) {
+        $safeUser = ([string]$defaultUser).Trim() -replace "[^A-Za-z0-9._-]", ""
+        if ($safeUser) {
+            Invoke-LiaisonWslRoot -Distribution $Distribution -Script "usermod -aG docker '$safeUser' || true"
+        }
     }
-    return Get-LiaisonDockerExe
+    Start-LiaisonWslDocker -Distribution $Distribution
+    if (-not (Test-LiaisonWslDocker -Distribution $Distribution)) {
+        throw "Docker Engine was installed but did not become ready inside WSL."
+    }
 }
 
 function Add-LiaisonToolPaths {
     $paths = @(
-        "$env:ProgramFiles\Docker\Docker\resources\bin",
-        "$env:LOCALAPPDATA\Programs\Docker\Docker\resources\bin",
         "$env:ProgramFiles\Tailscale",
         "$env:LOCALAPPDATA\Tailscale"
     ) | Where-Object { Test-Path $_ }
