@@ -5,7 +5,10 @@ mod server;
 
 use std::{
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -63,6 +66,10 @@ fn run_console(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         config.runtime = runtime;
     }
     let shutdown = Arc::new(AtomicBool::new(false));
+    let signal_shutdown = Arc::clone(&shutdown);
+    ctrlc::set_handler(move || {
+        signal_shutdown.store(true, Ordering::Relaxed);
+    })?;
     run_with_config(config, shutdown)
 }
 
@@ -109,15 +116,25 @@ fn run_with_config(
         );
     }
 
-    let app = Arc::new(ServiceApp::new(config.clone(), runtime)?);
+    let app = Arc::new(ServiceApp::new(config.clone(), Arc::clone(&runtime))?);
     let interval = Duration::from_millis(config.metrics_interval_ms.max(250));
-    server::run(
+    let server_result = server::run(
         app,
+        Arc::clone(&runtime),
         &config.listen_address,
         Arc::new(config.auth_token),
         shutdown,
         interval,
-    )?;
+    );
+
+    tracing::info!("stopping Liaison-managed containers");
+    let shutdown_result = runtime.stop_all();
+    if let Err(error) = &shutdown_result {
+        tracing::error!(%error, "failed to stop one or more managed containers");
+    }
+
+    server_result?;
+    shutdown_result?;
     Ok(())
 }
 
