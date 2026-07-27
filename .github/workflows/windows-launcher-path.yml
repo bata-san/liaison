@@ -11,41 +11,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run launcher from Unicode parenthesized path
+      - name: Prepare Unicode parenthesized path
         shell: powershell
         run: |
-          $testRoot = Join-Path $env:RUNNER_TEMP "科学部(生徒用)\liaison-server"
+          $testRoot = Join-Path $PWD "launcher-test\科学部(生徒用)\liaison-server"
           $scripts = Join-Path $testRoot "scripts"
           New-Item -ItemType Directory -Force -Path $scripts | Out-Null
           Copy-Item "scripts\install-server-launcher.cmd" (Join-Path $testRoot "Install Liaison Server.cmd")
           Set-Content -Path (Join-Path $scripts "install-server-bundle.ps1") -Value "exit 0" -Encoding UTF8
+          Remove-Item (Join-Path $env:TEMP "LiaisonServerLauncher.log") -Force -ErrorAction SilentlyContinue
 
+      - name: Run launcher from Unicode parenthesized path
+        shell: cmd
+        working-directory: launcher-test/科学部(生徒用)/liaison-server
+        env:
+          LIAISON_LAUNCHER_TEST: "1"
+        run: call "Install Liaison Server.cmd"
+
+      - name: Verify launcher result
+        shell: powershell
+        run: |
           $launcherLog = Join-Path $env:TEMP "LiaisonServerLauncher.log"
-          $outputLog = Join-Path $env:RUNNER_TEMP "launcher-output.txt"
-          Remove-Item $launcherLog, $outputLog -Force -ErrorAction SilentlyContinue
-          $env:LIAISON_LAUNCHER_TEST = "1"
-          Push-Location $testRoot
-          try {
-            $launcherOutput = & ".\Install Liaison Server.cmd" 2>&1
-            $launcherExitCode = $LASTEXITCODE
-            $launcherOutput | Out-File -FilePath $outputLog -Encoding UTF8
-            $launcherOutput | ForEach-Object { Write-Host $_ }
-          } finally {
-            Pop-Location
-            Remove-Item Env:LIAISON_LAUNCHER_TEST -ErrorAction SilentlyContinue
-          }
-
-          if (Test-Path $launcherLog) {
-            Write-Host "--- launcher log ---"
-            Get-Content $launcherLog
-            Write-Host "--- end launcher log ---"
-          }
-          if ($launcherExitCode -ne 0) {
-            throw "Launcher failed from the Unicode parenthesized path with exit code $launcherExitCode."
-          }
           if (-not (Test-Path $launcherLog)) {
             throw "Launcher log was not created."
           }
+          Write-Host "--- launcher log ---"
+          Get-Content $launcherLog
+          Write-Host "--- end launcher log ---"
           if (-not (Select-String -Path $launcherLog -SimpleMatch "PowerShell exited with code 0." -Quiet)) {
             throw "Launcher did not record a successful PowerShell exit."
           }
@@ -55,7 +47,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-launcher-path-diagnostics
-          path: |
-            ${{ runner.temp }}\LiaisonServerLauncher.log
-            ${{ runner.temp }}\launcher-output.txt
+          path: ${{ runner.temp }}\LiaisonServerLauncher.log
           if-no-files-found: warn
