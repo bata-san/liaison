@@ -1,0 +1,14 @@
+html,
+body,
+#root {
+  min-width: 0 !important;
+  min-height: 0 !important;
+}
+
+.connection-screen {
+  position: fixed;
+  inset: 0;
+  width: auto;
+  height: auto;
+  place-content: center;
+}
