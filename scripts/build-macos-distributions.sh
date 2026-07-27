@@ -75,12 +75,13 @@ Liaison Server for Apple silicon Mac
 
 1. Extract this ZIP.
 2. Double-click Install Liaison Server.command.
-3. The installer downloads the official Tailscale and Docker Desktop installers when needed.
-4. Complete the macOS approval, Tailscale sign-in, and Docker first-run screens.
-5. Copy liaison-client.json from the Desktop into a client package.
+3. The installer prepares Homebrew, Colima, Docker CLI, and the headless tailscaled service.
+4. Complete the one-time Tailscale browser login when prompted.
+5. Copy the displayed liaison:// pairing code into Liaison Client.
 
-Apple GPU assignment is not supported. CPU, memory, and Docker workers are supported.
-Docker Desktop terms apply. Commercial use may require a paid Docker subscription.
+Docker Desktop and the Tailscale GUI are not required.
+The server stops Liaison-managed containers when it shuts down.
+Apple GPU assignment is not supported for regular Docker workers.
 README
 
 /usr/bin/ditto "$BUNDLED_APP" "$CLIENT_APP"
@@ -102,12 +103,13 @@ cat > "$CLIENT_PACKAGE/README.txt" <<'README'
 Liaison Client for Apple silicon Mac
 
 1. Extract this ZIP.
-2. Copy liaison-client.json from the server into this folder.
-3. Double-click Install Liaison Client.command.
-4. The installer downloads Tailscale from the official package server when required.
-5. Complete Tailscale sign-in when prompted.
+2. Double-click Install Liaison Client.command.
+3. Complete the one-time headless Tailscale browser login when prompted.
+4. Open Liaison Client and paste the server pairing code.
 
-The Liaison app is installed into ~/Applications.
+A liaison-client.json file is optional. The app can save the address and token itself.
+Worker management and the workspace terminal are integrated into Liaison Client.
+The app is installed into ~/Applications.
 README
 
 chmod +x \
