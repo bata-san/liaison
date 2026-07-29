@@ -1,0 +1,146 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #18181b;
+  background: #f4f4f5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 760px; min-height: 620px; background: #f4f4f5; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: wait; opacity: .58; }
+
+.loading-screen {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  color: #52525b;
+}
+
+.brand-mark, .brand > span {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: #18181b;
+  color: white;
+  font-weight: 750;
+}
+
+.setup-shell {
+  width: min(1040px, calc(100vw - 48px));
+  margin: 0 auto;
+  padding: 38px 0 28px;
+}
+
+.setup-header {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 28px;
+  align-items: end;
+  padding-bottom: 28px;
+  border-bottom: 1px solid #d4d4d8;
+}
+
+.brand { display: flex; align-items: center; gap: 12px; font-size: 20px; }
+.header-copy h1 { margin: 0 0 8px; font-size: 34px; letter-spacing: -.035em; }
+.header-copy p { margin: 0; color: #71717a; line-height: 1.65; }
+
+.setup-content { padding: 30px 0 22px; }
+.role-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.role-card {
+  position: relative;
+  min-height: 300px;
+  padding: 26px;
+  text-align: left;
+  border: 1px solid #d4d4d8;
+  border-radius: 18px;
+  background: rgba(255,255,255,.86);
+  color: inherit;
+  transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
+}
+.role-card:hover { transform: translateY(-1px); border-color: #a1a1aa; }
+.role-card.selected { border-color: #18181b; box-shadow: 0 0 0 1px #18181b, 0 16px 40px rgba(24,24,27,.08); }
+.role-number { display: block; margin-bottom: 40px; color: #a1a1aa; font-size: 12px; font-weight: 700; letter-spacing: .12em; }
+.role-card h2 { margin: 0 0 10px; font-size: 22px; letter-spacing: -.02em; }
+.role-card p { margin: 0; color: #71717a; line-height: 1.65; }
+.role-card ul { margin: 28px 0 0; padding: 0; list-style: none; display: grid; gap: 9px; color: #3f3f46; font-size: 13px; }
+.role-card li::before { content: "—"; margin-right: 8px; color: #a1a1aa; }
+
+.option-row, .setup-actions, .complete-card, .progress-card, .restart-card, .log-card {
+  border: 1px solid #d4d4d8;
+  border-radius: 16px;
+  background: white;
+}
+
+.option-row {
+  margin-top: 16px;
+  padding: 18px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.option-row span { display: grid; gap: 4px; }
+.option-row small { color: #71717a; }
+.option-row input { width: 20px; height: 20px; }
+
+.setup-actions {
+  margin-top: 16px;
+  padding: 18px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.setup-actions > div { display: grid; gap: 4px; }
+.eyebrow { color: #a1a1aa; font-size: 10px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
+
+.primary-button, .secondary-button {
+  min-height: 42px;
+  padding: 0 18px;
+  border-radius: 10px;
+  font-weight: 700;
+}
+.primary-button { border: 1px solid #18181b; background: #18181b; color: white; }
+.secondary-button { border: 1px solid #d4d4d8; background: white; color: #27272a; }
+
+.progress-card, .restart-card, .log-card { margin-top: 16px; padding: 20px; }
+.progress-card strong, .restart-card strong { display: block; margin-bottom: 6px; }
+.progress-card p, .restart-card p { margin: 0; color: #71717a; line-height: 1.6; font-size: 13px; }
+.progress-bar { height: 4px; margin-bottom: 18px; overflow: hidden; border-radius: 999px; background: #e4e4e7; }
+.progress-bar span { display: block; width: 34%; height: 100%; border-radius: inherit; background: #18181b; animation: progress 1.4s ease-in-out infinite alternate; }
+@keyframes progress { from { transform: translateX(-40%); } to { transform: translateX(235%); } }
+.restart-card { border-color: #facc15; background: #fefce8; }
+
+.complete-card {
+  margin-top: 30px;
+  padding: 28px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 20px;
+  align-items: center;
+}
+.complete-icon { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 50%; background: #18181b; color: white; font-size: 24px; }
+.complete-card h2 { margin: 4px 0 6px; font-size: 25px; }
+.complete-card p { margin: 0; color: #71717a; line-height: 1.55; }
+.complete-actions { display: flex; gap: 8px; }
+
+.log-card summary { cursor: pointer; font-weight: 700; }
+.log-card pre { max-height: 260px; overflow: auto; margin: 14px 0 0; padding: 14px; border-radius: 10px; background: #18181b; color: #e4e4e7; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+
+.setup-footer { display: flex; justify-content: space-between; padding-top: 20px; color: #a1a1aa; font-size: 11px; }
+.is-busy .role-card { pointer-events: none; }
+
+@media (max-width: 840px) {
+  body { min-width: 620px; }
+  .setup-header { grid-template-columns: 1fr; }
+  .role-grid { grid-template-columns: 1fr; }
+  .role-card { min-height: 230px; }
+  .role-number { margin-bottom: 22px; }
+  .complete-card { grid-template-columns: auto 1fr; }
+  .complete-actions { grid-column: 1 / -1; }
+}
