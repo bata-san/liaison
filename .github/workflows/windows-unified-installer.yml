@@ -34,6 +34,7 @@ jobs:
             "scripts/setup-progress.ps1",
             "scripts/wsl-install-direct.ps1",
             "scripts/wsl-install-resilience.ps1",
+            "scripts/wsl-virtualization-preflight.ps1",
             "scripts/install-client-bundle.ps1",
             "scripts/install-server-bundle.ps1",
             "scripts/install-server-core.ps1",
