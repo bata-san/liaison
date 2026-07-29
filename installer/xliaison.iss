@@ -1,4 +1,4 @@
-#define MyAppName "xLiaison"
+﻿#define MyAppName "xLiaison"
 #define MyAppVersion "0.2.0"
 #define MyAppPublisher "xLiaison"
 
