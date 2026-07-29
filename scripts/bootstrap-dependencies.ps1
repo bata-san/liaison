@@ -10,6 +10,14 @@ if (-not (Test-Path -LiteralPath $wslResilience -PathType Leaf)) {
 }
 . $wslResilience
 
+# Prefer Canonical's official Ubuntu WSL image and wsl --import. This path does not
+# depend on Microsoft Store availability and provides byte-level download progress.
+$directUbuntuInstaller = Join-Path $PSScriptRoot "wsl-install-direct.ps1"
+if (-not (Test-Path -LiteralPath $directUbuntuInstaller -PathType Leaf)) {
+    throw ("Direct Ubuntu WSL installer is missing: " + $directUbuntuInstaller)
+}
+. $directUbuntuInstaller
+
 $progressHelper = Join-Path $PSScriptRoot "setup-progress.ps1"
 if (Test-Path -LiteralPath $progressHelper -PathType Leaf) {
     . $progressHelper
