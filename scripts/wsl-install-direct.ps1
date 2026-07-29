@@ -1,115 +1,190 @@
-# Final WSL overrides for the unified installer. These definitions are loaded after
-# bootstrap-dependencies.ps1 and wsl-install-fallback.ps1.
-
-function Invoke-LiaisonDownloadWithProgress {
-    param(
-        [Parameter(Mandatory = $true)][string]$Uri,
-        [Parameter(Mandatory = $true)][string]$Destination,
-        [ValidateRange(0, 100)][int]$ProgressStart = 27,
-        [ValidateRange(0, 100)][int]$ProgressEnd = 38
-    )
-
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Add-Type -AssemblyName System.Net.Http
-
-    $directory = Split-Path -Parent $Destination
-    New-Item -ItemType Directory -Force -Path $directory | Out-Null
-    $temporary = $Destination + ".partial"
-    Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-
-    $handler = [System.Net.Http.HttpClientHandler]::new()
-    $client = [System.Net.Http.HttpClient]::new($handler)
-    $client.Timeout = [TimeSpan]::FromMinutes(45)
-    $response = $null
-    $input = $null
-    $output = $null
+function Get-LiaisonWslDistributions {
+    $names = @()
+    $oldPreference = $ErrorActionPreference
     try {
-        $response = $client.GetAsync(
-            $Uri,
-            [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead
-        ).GetAwaiter().GetResult()
-        $response.EnsureSuccessStatusCode()
-        $totalValue = $response.Content.Headers.ContentLength
-        $total = if ($null -eq $totalValue) { [int64]0 } else { [int64]$totalValue }
-        $input = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-        $output = [IO.File]::Open($temporary, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $buffer = New-Object byte[] (1024 * 1024)
-        $downloaded = [int64]0
-        $lastLoggedPercent = -1
-        $lastLoggedAt = [DateTimeOffset]::Now
-
-        while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            $output.Write($buffer, 0, $read)
-            $downloaded += $read
-            $now = [DateTimeOffset]::Now
-            $shouldLog = ($now - $lastLoggedAt).TotalSeconds -ge 2
-
-            if ($total -gt 0) {
-                $downloadPercent = [Math]::Min(100, [Math]::Floor(($downloaded * 100.0) / $total))
-                if ($downloadPercent -ne $lastLoggedPercent -and $shouldLog) {
-                    $span = [Math]::Max(1, $ProgressEnd - $ProgressStart)
-                    $overall = [Math]::Min($ProgressEnd, $ProgressStart + [Math]::Floor($span * ($downloadPercent / 100.0)))
-                    $downloadedMb = [Math]::Round($downloaded / 1MB, 1)
-                    $totalMb = [Math]::Round($total / 1MB, 1)
-                    Write-LiaisonWslInstallProgress $overall "Ubuntuをダウンロード" "${downloadPercent}% — ${downloadedMb} MB / ${totalMb} MB"
-                    $lastLoggedPercent = $downloadPercent
-                    $lastLoggedAt = $now
-                }
-            } elseif ($shouldLog) {
-                $downloadedMb = [Math]::Round($downloaded / 1MB, 1)
-                Write-LiaisonWslInstallProgress $ProgressStart "Ubuntuをダウンロード" "${downloadedMb} MBを受信しました。"
-                $lastLoggedAt = $now
-            }
-        }
-        $output.Flush()
+        $ErrorActionPreference = "Continue"
+        $raw = @(& "$env:SystemRoot\System32\wsl.exe" --list --quiet 2>$null)
+        $code = $LASTEXITCODE
+    } catch {
+        $raw = @()
+        $code = -1
     } finally {
-        if ($output) { $output.Dispose() }
-        if ($input) { $input.Dispose() }
-        if ($response) { $response.Dispose() }
-        $client.Dispose()
-        $handler.Dispose()
+        $ErrorActionPreference = $oldPreference
     }
 
-    Move-Item -LiteralPath $temporary -Destination $Destination -Force
+    if ($code -eq 0) {
+        foreach ($item in $raw) {
+            $name = (([string]$item) -replace "\x00", "").Trim()
+            if ($name) { $names += $name }
+        }
+    }
+
+    $registryRoot = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Lxss"
+    if (Test-Path -LiteralPath $registryRoot) {
+        foreach ($key in Get-ChildItem -LiteralPath $registryRoot -ErrorAction SilentlyContinue) {
+            try {
+                $name = (Get-ItemProperty -LiteralPath $key.PSPath -Name DistributionName -ErrorAction Stop).DistributionName
+                if ($name) { $names += ([string]$name).Trim() }
+            } catch {
+            }
+        }
+    }
+
+    return @($names | Where-Object { $_ } | Sort-Object -Unique)
+}
+
+function Invoke-LiaisonWslCommand {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    Write-LiaisonUnifiedLog ("WSL command: wsl.exe " + ($Arguments -join " "))
+    $oldPreference = $ErrorActionPreference
+    $raw = @()
+    $code = -1
+    try {
+        $ErrorActionPreference = "Continue"
+        $raw = @(& "$env:SystemRoot\System32\wsl.exe" @Arguments 2>&1)
+        if ($null -ne $LASTEXITCODE) { $code = [int]$LASTEXITCODE }
+    } catch {
+        $raw = @($_.Exception.Message)
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+
+    $output = @()
+    foreach ($item in $raw) {
+        $line = (([string]$item) -replace "\x00", "").Trim()
+        if ($line) {
+            $output += $line
+            Write-LiaisonUnifiedLog ("WSL|" + $line)
+        }
+    }
+    Write-LiaisonUnifiedLog ("WSL exit code: " + $code)
+
+    return [pscustomobject]@{
+        ExitCode = $code
+        Output = $output
+    }
+}
+
+function Get-LiaisonWslDetail($Result) {
+    $tail = @($Result.Output | Select-Object -Last 12)
+    if ($tail.Count -eq 0) { return "WSL returned no diagnostic output." }
+    return ($tail -join " | ")
+}
+
+function Invoke-LiaisonUbuntuDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $folder = Split-Path -Parent $Destination
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    $partial = $Destination + ".partial"
+    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+
+    $bitsAvailable = $false
+    try {
+        Import-Module BitsTransfer -ErrorAction Stop
+        if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) { $bitsAvailable = $true }
+    } catch {
+        $bitsAvailable = $false
+    }
+
+    if ($bitsAvailable) {
+        $job = $null
+        try {
+            $job = Start-BitsTransfer -Source $Uri -Destination $partial -Asynchronous -DisplayName "Liaison Ubuntu WSL" -ErrorAction Stop
+            while ($true) {
+                $job = Get-BitsTransfer -Id $job.Id -ErrorAction Stop
+                if ($job.JobState -eq "Transferred") {
+                    Complete-BitsTransfer -BitsJob $job -ErrorAction Stop
+                    break
+                }
+                if ($job.JobState -eq "Error" -or $job.JobState -eq "Cancelled") {
+                    throw ("BITS download failed: " + $job.ErrorDescription)
+                }
+                if ($job.BytesTotal -gt 0) {
+                    $downloadPercent = [Math]::Floor(($job.BytesTransferred * 100.0) / $job.BytesTotal)
+                    $overall = 28 + [Math]::Floor($downloadPercent * 0.10)
+                    $received = [Math]::Round($job.BytesTransferred / 1MB, 1)
+                    $total = [Math]::Round($job.BytesTotal / 1MB, 1)
+                    Write-LiaisonProgress $overall "Ubuntuをダウンロード" "${downloadPercent}% - ${received} MB / ${total} MB"
+                }
+                Start-Sleep -Seconds 2
+            }
+        } catch {
+            if ($job) {
+                Remove-BitsTransfer -BitsJob $job -ErrorAction SilentlyContinue
+            }
+            Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+            Write-LiaisonUnifiedLog ("WARNING|BITS download failed: " + $_.Exception.Message)
+            Write-LiaisonProgress 28 "Ubuntuをダウンロード" "通常のHTTPSダウンロードへ切り替えました。"
+            Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $partial -ErrorAction Stop
+        }
+    } else {
+        Write-LiaisonProgress 28 "Ubuntuをダウンロード" "公式イメージをHTTPSで取得しています。"
+        Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $partial -ErrorAction Stop
+    }
+
+    Move-Item -LiteralPath $partial -Destination $Destination -Force
 }
 
 function Ensure-LiaisonWslDistribution {
     param([Parameter(Mandatory = $true)][string]$Distribution)
 
     if ((Get-LiaisonWslDistributions) -contains $Distribution) {
-        Write-LiaisonWslInstallLog "WSL distribution already installed: $Distribution"
+        Write-LiaisonUnifiedLog ("WSL distribution already installed: " + $Distribution)
         return
     }
 
-    Write-LiaisonDependencyStep "Installing the $Distribution WSL distribution"
-    Write-LiaisonWslInstallProgress 26 "Ubuntu公式イメージを使用" "Microsoft Storeを経由せず、Ubuntu 24.04 LTSを直接導入します。"
-    Install-LiaisonUbuntuByImport -Distribution $Distribution
+    $fileName = "ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
+    $baseUri = "https://cloud-images.ubuntu.com/wsl/releases/noble/current"
+    $archiveUri = $baseUri + "/" + $fileName
+    $checksumUri = $baseUri + "/SHA256SUMS"
+    $downloadFolder = Join-Path $env:ProgramData "Liaison\downloads"
+    $archivePath = Join-Path $downloadFolder $fileName
 
-    for ($attempt = 0; $attempt -lt 60; $attempt++) {
-        if ((Get-LiaisonWslDistributions) -contains $Distribution) {
-            break
-        }
-        Start-Sleep -Seconds 1
-        if (($attempt % 5) -eq 4) {
-            Write-LiaisonWslInstallProgress 41 "Ubuntuの登録を確認" "WSLディストリビューション一覧への反映を待っています。経過 $($attempt + 1)秒"
-        }
+    Write-LiaisonProgress 26 "Ubuntu公式イメージを準備" "Microsoft Storeを使わずUbuntu 24.04 LTSを直接導入します。"
+    $needDownload = $true
+    if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
+        if ((Get-Item -LiteralPath $archivePath).Length -gt 100MB) { $needDownload = $false }
     }
-    if ((Get-LiaisonWslDistributions) -notcontains $Distribution) {
-        throw "The $Distribution WSL distribution was imported but was not registered in the current Windows user profile."
-    }
-
-    Write-LiaisonWslInstallProgress 42 "Ubuntuを初期化" "Ubuntuをrootユーザーで初回起動しています。"
-    $initResult = Invoke-LiaisonWslInstall -Arguments @(
-        "-d", $Distribution, "-u", "root", "--exec", "sh", "-lc", "true"
-    )
-    if ($initResult.ExitCode -ne 0) {
-        $detail = Get-LiaisonWslFailureDetail $initResult
-        $lower = $detail.ToLowerInvariant()
-        if ($lower.Contains("restart") -or $lower.Contains("再起動") -or $lower.Contains("hcs_e_hyperv_not_installed")) {
-            throw "Ubuntu was installed, but Windows must be restarted before WSL 2 can start. $detail"
-        }
-        throw "Ubuntu was installed but could not be initialized (exit code $($initResult.ExitCode)). $detail"
+    if ($needDownload) {
+        Invoke-LiaisonUbuntuDownload -Uri $archiveUri -Destination $archivePath
+    } else {
+        Write-LiaisonUnifiedLog ("Using cached Ubuntu image: " + $archivePath)
     }
 
-    Write-LiaisonWslInstallProgress 43 "Ubuntu準備完了" "Ubuntu WSLディストリビューションを初期化しました。"
+    Write-LiaisonProgress 39 "Ubuntuイメージを検証" "公式SHA-256とダウンロード済みファイルを照合しています。"
+    $checksumText = (Invoke-WebRequest -UseBasicParsing -Uri $checksumUri -ErrorAction Stop).Content
+    $pattern = "(?im)^([a-f0-9]{64})\s+\*?" + [regex]::Escape($fileName) + "\s*$"
+    $match = [regex]::Match([string]$checksumText, $pattern)
+    if (-not $match.Success) {
+        throw ("The Ubuntu checksum file did not contain " + $fileName + ".")
+    }
+    $expected = $match.Groups[1].Value.ToLowerInvariant()
+    $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        throw "The downloaded Ubuntu image failed SHA-256 verification."
+    }
+    Write-LiaisonUnifiedLog ("Ubuntu SHA-256 verified: " + $actual)
+
+    $installLocation = Join-Path $env:LOCALAPPDATA ("Liaison\WSL\" + $Distribution)
+    New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
+    Write-LiaisonProgress 40 "Ubuntuを展開" "公式イメージをWSL 2ディストリビューションとして登録しています。"
+    $import = Invoke-LiaisonWslCommand -Arguments @("--import", $Distribution, $installLocation, $archivePath, "--version", "2")
+    if ($import.ExitCode -ne 0) {
+        throw ("Ubuntu import failed with exit code " + $import.ExitCode + ". " + (Get-LiaisonWslDetail $import))
+    }
+
+    Write-LiaisonProgress 42 "Ubuntuを初期化" "Ubuntuをrootユーザーで初回起動しています。"
+    $initialize = Invoke-LiaisonWslCommand -Arguments @("-d", $Distribution, "-u", "root", "--exec", "sh", "-lc", "true")
+    if ($initialize.ExitCode -ne 0) {
+        $detail = Get-LiaisonWslDetail $initialize
+        throw ("Ubuntu was imported but could not start. Windows may need a restart. " + $detail)
+    }
+
+    Write-LiaisonProgress 43 "Ubuntu準備完了" "Ubuntu WSLディストリビューションを初期化しました。"
 }

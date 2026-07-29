@@ -1,0 +1,344 @@
+param(
+    [string]$WslDistribution = "Ubuntu",
+    [switch]$LocalOnly,
+    [switch]$SkipDependencyInstall,
+    [string]$LauncherLogPath,
+    [string]$InstallLogPath
+)
+
+$ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent $PSScriptRoot
+$LauncherLog = if ($LauncherLogPath) { $LauncherLogPath } else { Join-Path $env:TEMP "LiaisonServerLauncher.log" }
+$InstallLog = if ($InstallLogPath) { $InstallLogPath } else { Join-Path $env:TEMP "LiaisonServerInstall.log" }
+
+function Write-EarlyLog([string]$Message) {
+    try {
+        $line = "{0} {1}" -f ([DateTimeOffset]::Now.ToString("o")), $Message
+        Add-Content -Path $LauncherLog -Value $line -Encoding UTF8
+    } catch {
+        # Logging must never prevent setup from continuing.
+    }
+}
+
+function Test-Administrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-LiaisonShortPath([string]$Path) {
+    try {
+        if (-not ("LiaisonShortPath" -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+
+public static class LiaisonShortPath
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetShortPathName(
+        string longPath,
+        StringBuilder shortPath,
+        uint bufferLength);
+}
+'@
+        }
+
+        $buffer = New-Object Text.StringBuilder 1024
+        $length = [LiaisonShortPath]::GetShortPathName($Path, $buffer, [uint32]$buffer.Capacity)
+        if ($length -gt 0 -and $length -lt $buffer.Capacity) {
+            return $buffer.ToString()
+        }
+    } catch {
+        Write-EarlyLog ("Short-path conversion failed; using the quoted full path: " + $_.Exception.Message)
+    }
+
+    return $Path
+}
+
+function Quote-LiaisonProcessArgument([string]$Value) {
+    if ($null -eq $Value) {
+        return '""'
+    }
+    if ($Value.Contains('"')) {
+        throw "A process argument contains an unsupported quote character."
+    }
+    return '"' + $Value + '"'
+}
+
+Write-EarlyLog "PowerShell installer entered. Script: $PSCommandPath"
+
+if (-not (Test-Administrator)) {
+    try {
+        # Managed Windows environments commonly block -EncodedCommand. Use a normal
+        # -File launch instead. Prefer the DOS 8.3 path so spaces, Japanese text and
+        # parentheses cannot be reinterpreted by the elevated command line parser.
+        $elevationScript = Get-LiaisonShortPath $PSCommandPath
+        $argumentParts = @(
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", (Quote-LiaisonProcessArgument $elevationScript),
+            "-WslDistribution", (Quote-LiaisonProcessArgument $WslDistribution),
+            "-LauncherLogPath", (Quote-LiaisonProcessArgument $LauncherLog),
+            "-InstallLogPath", (Quote-LiaisonProcessArgument $InstallLog)
+        )
+        if ($LocalOnly) { $argumentParts += "-LocalOnly" }
+        if ($SkipDependencyInstall) { $argumentParts += "-SkipDependencyInstall" }
+        $argumentLine = $argumentParts -join " "
+
+        Write-EarlyLog "Requesting administrator elevation with a normal -File command."
+        Write-EarlyLog "Elevated script path: $elevationScript"
+        $process = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList $argumentLine
+        Write-EarlyLog "Elevated installer exited with code $($process.ExitCode)."
+        exit $process.ExitCode
+    } catch {
+        Write-EarlyLog ("Administrator elevation failed: " + $_.Exception.Message)
+        Write-Host "Administrator elevation failed." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host "Launcher log: $LauncherLog"
+        exit 1
+    }
+}
+
+$transcriptStarted = $false
+$exitCode = 0
+try {
+    Write-EarlyLog "Administrator installer started."
+    try {
+        Start-Transcript -Path $InstallLog -Append | Out-Null
+        $transcriptStarted = $true
+    } catch {
+        Write-EarlyLog ("Installation transcript could not be started: " + $_.Exception.Message)
+        Write-Warning "Installation transcript could not be started: $($_.Exception.Message)"
+    }
+
+    $bootstrapPath = Join-Path $PSScriptRoot "bootstrap-dependencies.ps1"
+    if (-not (Test-Path $bootstrapPath)) {
+        throw "Dependency bootstrap script is missing: $bootstrapPath"
+    }
+    . $bootstrapPath
+
+    # Native WSL failures must include useful diagnostics rather than a generic error.
+    function Invoke-LiaisonWslRoot {
+        param(
+            [Parameter(Mandatory = $true)][string]$Distribution,
+            [Parameter(Mandatory = $true)][string]$Script
+        )
+
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $rawOutput = & "$env:SystemRoot\System32\wsl.exe" -d $Distribution -u root --exec sh -lc $Script 2>&1
+            $nativeExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        $cleanOutput = @(
+            $rawOutput |
+                ForEach-Object { (([string]$_) -replace "\x00", "").TrimEnd() } |
+                Where-Object { $_ }
+        )
+        foreach ($line in $cleanOutput) {
+            Write-Host $line
+        }
+
+        if ($nativeExitCode -ne 0) {
+            $tail = @($cleanOutput | Select-Object -Last 16)
+            $detail = if ($tail.Count -gt 0) { $tail -join " | " } else { "No output was returned by WSL." }
+            throw "A root command failed inside WSL distribution '$Distribution' with exit code $nativeExitCode. Last output: $detail"
+        }
+    }
+
+    # A missing Docker command is an expected pre-installation state, not an error.
+    function Test-LiaisonWslDocker {
+        param([Parameter(Mandatory = $true)][string]$Distribution)
+
+        $previousErrorActionPreference = $ErrorActionPreference
+        $nativeExitCode = 1
+        try {
+            $ErrorActionPreference = "Continue"
+            & "$env:SystemRoot\System32\wsl.exe" -d $Distribution -u root --exec sh -lc "command -v docker >/dev/null 2>&1 && command -v dockerd >/dev/null 2>&1 && docker info >/dev/null 2>&1" 2>$null | Out-Null
+            $nativeExitCode = $LASTEXITCODE
+        } catch {
+            $nativeExitCode = 1
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        return $nativeExitCode -eq 0
+    }
+
+    # Provision Docker without Docker Desktop. Ubuntu's own package is preferred because
+    # managed networks often block download.docker.com while allowing Ubuntu mirrors.
+    function Install-LiaisonDockerEngineInWsl {
+        param([Parameter(Mandatory = $true)][string]$Distribution)
+
+        Write-LiaisonDependencyStep "Installing Docker Engine inside WSL"
+        Invoke-LiaisonWslRoot -Distribution $Distribution -Script @'
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+
+if command -v docker >/dev/null 2>&1 && command -v dockerd >/dev/null 2>&1; then
+  exit 0
+fi
+
+if ! command -v apt-get >/dev/null 2>&1; then
+  echo "This WSL distribution does not provide apt-get. An Ubuntu or Debian distribution is required."
+  exit 41
+fi
+
+# Remove a possibly incomplete source left by an earlier installer attempt. The Ubuntu
+# archive package is attempted first and does not require Docker Desktop.
+rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources
+apt-get update -o Acquire::Retries=3
+
+if apt-get install -y ca-certificates curl docker.io; then
+  exit 0
+fi
+
+echo "Ubuntu's docker.io package failed; trying Docker's official repository."
+apt-get install -y ca-certificates curl gnupg
+install -m 0755 -d /etc/apt/keyrings
+curl --retry 3 --retry-delay 2 -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+. /etc/os-release
+cat > /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+apt-get update -o Acquire::Retries=3
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+'@
+
+        $defaultUser = (& "$env:SystemRoot\System32\wsl.exe" -d $Distribution --exec sh -lc 'id -un' 2>$null | Select-Object -First 1)
+        if ($defaultUser) {
+            $safeUser = ([string]$defaultUser).Trim() -replace "[^A-Za-z0-9._-]", ""
+            if ($safeUser -and $safeUser -ne "root") {
+                Invoke-LiaisonWslRoot -Distribution $Distribution -Script "usermod -aG docker '$safeUser' || true"
+            }
+        }
+
+        Start-LiaisonWslDocker -Distribution $Distribution
+        if (-not (Test-LiaisonWslDocker -Distribution $Distribution)) {
+            throw "Docker Engine was installed but did not become ready inside WSL distribution '$Distribution'. Check /var/log/liaison-dockerd.log."
+        }
+    }
+
+    Add-LiaisonToolPaths | Out-Null
+
+    if (-not $SkipDependencyInstall) {
+        Ensure-LiaisonWslFeatures
+
+        $installedDistributions = @(
+            Get-LiaisonWslDistributions |
+                Where-Object { $_ -and $_ -notlike "docker-desktop*" }
+        )
+        $selectedDistribution = $installedDistributions |
+            Where-Object { $_ -ieq $WslDistribution } |
+            Select-Object -First 1
+
+        if (-not $selectedDistribution -and $WslDistribution -like "Ubuntu*") {
+            $selectedDistribution = $installedDistributions |
+                Where-Object { $_ -like "Ubuntu*" } |
+                Sort-Object -Descending |
+                Select-Object -First 1
+        }
+
+        if ($selectedDistribution) {
+            if ($selectedDistribution -ine $WslDistribution) {
+                Write-Host "Using installed WSL distribution '$selectedDistribution' instead of '$WslDistribution'." -ForegroundColor Green
+                Write-EarlyLog "Using installed WSL distribution '$selectedDistribution' instead of '$WslDistribution'."
+            } else {
+                Write-Host "Using installed WSL distribution '$selectedDistribution'." -ForegroundColor Green
+            }
+            $WslDistribution = [string]$selectedDistribution
+        } else {
+            Ensure-LiaisonWslDistribution -Distribution $WslDistribution
+        }
+
+        if (Test-LiaisonWslDocker -Distribution $WslDistribution) {
+            Write-Host "Using the existing Docker Engine in WSL distribution '$WslDistribution'." -ForegroundColor Green
+        } else {
+            Install-LiaisonDockerEngineInWsl -Distribution $WslDistribution
+        }
+
+        if (-not $LocalOnly) {
+            $tailscaleIp = Connect-LiaisonTailscale -InstallIfMissing
+            if (-not $tailscaleIp) {
+                Write-Warning "Tailscale is not signed in. The server will be configured as local-only."
+                $LocalOnly = $true
+            }
+        }
+    }
+
+    # The control server must start before Docker workers. Persistent workers are
+    # started later by the resilient host script, so an image pull or container
+    # failure cannot terminate the Liaison control service.
+    $templatePath = Join-Path $Root "config\liaison.example.json"
+    if (-not (Test-Path $templatePath)) {
+        throw "Configuration template is missing: $templatePath"
+    }
+    $template = Get-Content $templatePath -Raw | ConvertFrom-Json
+    if ($template.PSObject.Properties.Name -contains "persistent_autostart") {
+        $template.persistent_autostart = $false
+    } else {
+        $template | Add-Member -NotePropertyName persistent_autostart -NotePropertyValue $false
+    }
+    [IO.File]::WriteAllText(
+        $templatePath,
+        ($template | ConvertTo-Json -Depth 10),
+        [Text.UTF8Encoding]::new($false)
+    )
+
+    $setupArguments = @(
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $PSScriptRoot "setup-server.ps1"),
+        "-WslDistribution", $WslDistribution,
+        "-SkipBuild"
+    )
+    if ($LocalOnly) { $setupArguments += "-LocalOnly" }
+
+    & powershell.exe @setupArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "The base Liaison Server setup failed with exit code $LASTEXITCODE."
+    }
+
+    & (Join-Path $PSScriptRoot "repair-windows-server.ps1") -WslDistribution $WslDistribution
+    if ($LASTEXITCODE -ne 0) {
+        throw "The resilient Windows startup configuration failed."
+    }
+
+    Write-Host ""
+    Write-Host "Liaison Server installation completed." -ForegroundColor Green
+    Write-Host "Launcher log: $LauncherLog"
+    Write-Host "Installation log: $InstallLog"
+    Write-Host "Runtime logs: $env:ProgramData\Liaison\logs"
+    $pairingPath = Join-Path $env:USERPROFILE "Desktop\Liaison Pairing Code.txt"
+    if (Test-Path $pairingPath) {
+        Write-Host "Pairing code: $pairingPath"
+    }
+    Write-EarlyLog "Installation completed successfully."
+} catch {
+    $exitCode = 1
+    Write-EarlyLog ("Installation failed: " + $_.Exception.Message)
+    Write-Host ""
+    Write-Host "Liaison Server installation failed." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "Launcher log: $LauncherLog"
+    Write-Host "Installation log: $InstallLog"
+    Write-Host "Runtime logs: $env:ProgramData\Liaison\logs"
+} finally {
+    if ($transcriptStarted) {
+        try { Stop-Transcript | Out-Null } catch {}
+    }
+}
+
+exit $exitCode

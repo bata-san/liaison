@@ -15,7 +15,7 @@ def replace_once(path: str, old: str, new: str, marker: str) -> None:
 
 
 replace_once(
-    "scripts/install-server-bundle.ps1",
+    "scripts/install-server-core.ps1",
     '            $rawOutput = & "$env:SystemRoot\\System32\\wsl.exe" -d $Distribution -u root --exec sh -lc $Script 2>&1',
     '''            # Windows PowerShell 5.1 can truncate multiline native arguments. Encode the
             # script as one ASCII argument, then restore the exact UTF-8/LF content in WSL.
@@ -29,7 +29,7 @@ replace_once(
 )
 
 replace_once(
-    "scripts/bootstrap-dependencies.ps1",
+    "scripts/bootstrap-dependencies-core.ps1",
     '    & wsl.exe -d $Distribution -u root -- sh -lc $Script',
     '''    # Keep multiline shell programs out of the Windows native command line. PowerShell
     # 5.1 may split or truncate them, especially around newlines and shell control flow.
