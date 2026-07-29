@@ -7,6 +7,7 @@ members = [
     "apps/liaison-service",
     "apps/liaison-cli",
     "apps/liaison-desktop/src-tauri",
+    "apps/liaison-installer/src-tauri",
 ]
 resolver = "2"
 
