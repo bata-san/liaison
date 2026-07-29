@@ -1,0 +1,95 @@
+name: Windows unified installer
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate unified setup PowerShell
+        shell: powershell
+        run: |
+          $files = @(
+            "scripts/bootstrap-dependencies.ps1",
+            "scripts/install-server-bundle.ps1",
+            "scripts/setup-server.ps1",
+            "scripts/repair-windows-server.ps1",
+            "scripts/start-server-windows.ps1",
+            "scripts/install-unified-role.ps1"
+          )
+          $messages = @()
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            foreach ($parseError in $errors) {
+              $messages += "$file`:$($parseError.Extent.StartLineNumber):$($parseError.Extent.StartColumnNumber) $($parseError.Message)"
+            }
+          }
+          if ($messages.Count -gt 0) {
+            $messages | ForEach-Object { Write-Host $_ }
+            exit 1
+          }
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dashboard frontend dependencies
+        working-directory: apps/liaison-desktop
+        run: npm install
+
+      - name: Build dashboard frontend
+        working-directory: apps/liaison-desktop
+        run: npm run build
+
+      - name: Build Liaison payload binaries
+        run: cargo build --release -p liaison-service -p liaison-cli -p liaison-desktop
+
+      - name: Install setup frontend dependencies
+        working-directory: apps/liaison-installer
+        run: npm install
+
+      - name: Build unified MSI
+        working-directory: apps/liaison-installer
+        run: npm run tauri:build -- --bundles msi
+
+      - name: Prepare installer artifact
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $msi = Get-ChildItem "apps/liaison-installer/src-tauri/target/release/bundle/msi/*.msi" |
+            Select-Object -First 1
+          if (-not $msi) {
+            throw "The unified Liaison MSI was not generated."
+          }
+          Copy-Item $msi.FullName "dist/Liaison-Setup-x64.msi" -Force
+          (Get-FileHash "dist/Liaison-Setup-x64.msi" -Algorithm SHA256).Hash |
+            Set-Content "dist/Liaison-Setup-x64.sha256.txt" -Encoding ASCII
+
+      - name: Upload unified installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: liaison-unified-windows-installer
+          path: |
+            dist/Liaison-Setup-x64.msi
+            dist/Liaison-Setup-x64.sha256.txt
+          if-no-files-found: error
