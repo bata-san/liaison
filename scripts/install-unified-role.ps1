@@ -21,6 +21,12 @@ function Write-UnifiedLog([string]$Message) {
     }
 }
 
+function Write-UnifiedProgress([int]$Percent, [string]$Stage, [string]$Detail) {
+    if ($Percent -lt 0) { $Percent = 0 }
+    if ($Percent -gt 100) { $Percent = 100 }
+    Write-UnifiedLog ("PROGRESS|{0}|{1}|{2}" -f $Percent, $Stage, $Detail)
+}
+
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -99,6 +105,7 @@ function New-LiaisonShortcut(
 $PayloadRoot = ConvertFrom-LiaisonExtendedPath $PayloadRoot
 $DashboardPath = ConvertFrom-LiaisonExtendedPath $DashboardPath
 Write-UnifiedLog "Unified setup entered. Role: $Role"
+Write-UnifiedProgress 2 "セットアップを起動中" "必要なファイルとWindowsの状態を確認しています。"
 
 if (-not (Test-Administrator)) {
     try {
@@ -120,6 +127,7 @@ if (-not (Test-Administrator)) {
         $argumentLine = $argumentParts -join " "
 
         Write-UnifiedLog "Requesting administrator elevation."
+        Write-UnifiedProgress 8 "管理者権限を確認中" "Windowsの確認画面が表示されたら「はい」を選択してください。"
         $process = Start-Process `
             -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
             -Verb RunAs `
@@ -127,8 +135,10 @@ if (-not (Test-Administrator)) {
             -Wait `
             -PassThru `
             -ArgumentList $argumentLine
-        Write-UnifiedLog "Elevated unified setup exited with code $($process.ExitCode)."
-        exit $process.ExitCode
+        $elevatedExitCode = -1
+        if ($null -ne $process.ExitCode) { $elevatedExitCode = [int]$process.ExitCode }
+        Write-UnifiedLog "Elevated unified setup exited with code $elevatedExitCode."
+        exit $elevatedExitCode
     } catch {
         Write-UnifiedLog ("Administrator elevation failed: " + $_.Exception.Message)
         exit 1
@@ -137,6 +147,7 @@ if (-not (Test-Administrator)) {
 
 try {
     Write-UnifiedLog "Administrator unified setup started."
+    Write-UnifiedProgress 12 "同梱ファイルを確認中" "Liaison本体とセットアップ部品を確認しています。"
     if (-not (Test-Path -LiteralPath $PayloadRoot)) {
         throw "The staged setup payload is missing: $PayloadRoot"
     }
@@ -160,8 +171,11 @@ try {
 
         Write-UnifiedLog "Starting server dependency and service setup."
         & $serverInstaller @arguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "Server setup failed with exit code $LASTEXITCODE."
+        $serverExitCode = -1
+        if ($null -ne $LASTEXITCODE) { $serverExitCode = [int]$LASTEXITCODE }
+        Write-UnifiedLog ("Server installer exit code: " + $serverExitCode)
+        if ($serverExitCode -ne 0) {
+            throw "Server setup failed with exit code $serverExitCode."
         }
 
         $connectionSource = Join-Path $env:USERPROFILE "Desktop\liaison-client.json"
@@ -189,6 +203,7 @@ try {
         }
     }
 
+    Write-UnifiedProgress 92 "ショートカットを作成中" "スタートメニューとデスクトップからLiaisonを開けるようにしています。"
     $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Liaison.lnk"
     $desktop = Join-Path $env:USERPROFILE "Desktop\Liaison.lnk"
     New-LiaisonShortcut $startMenu $DashboardPath
@@ -201,6 +216,7 @@ try {
         Remove-Item $oldShortcut -Force -ErrorAction SilentlyContinue
     }
 
+    Write-UnifiedProgress 100 "セットアップ完了" "Liaisonを起動できます。"
     Write-UnifiedLog "Unified setup completed successfully for role $Role."
     exit 0
 } catch {
