@@ -1,1 +1,0 @@
-Trigger Windows installer verification for direct Ubuntu WSL import.
