@@ -16,6 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Apply WSL transport compatibility fix
+        run: python .github/scripts/apply-wsl-transport-fix.py
+
       - name: Validate unified setup PowerShell
         shell: powershell
         run: |
