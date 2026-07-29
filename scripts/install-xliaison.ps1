@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("Prompt", "Server", "Client", "Both")]
     [string]$Role = "Prompt",
     [string]$ConnectionFile,
