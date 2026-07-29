@@ -7,5 +7,5 @@ if (-not (Test-Path -LiteralPath $coreBootstrap -PathType Leaf)) {
 $progressHelper = Join-Path $PSScriptRoot "setup-progress.ps1"
 if (Test-Path -LiteralPath $progressHelper -PathType Leaf) {
     . $progressHelper
-    Write-LiaisonProgress 18 "依存関係を確認" "Windows機能、WSL、Docker、Tailscaleの状態を確認しています。"
+    Write-LiaisonProgress 18 "Dependency check" "Checking Windows features, WSL, Docker, and Tailscale."
 }
