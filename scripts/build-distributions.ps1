@@ -1,7 +1,8 @@
 param(
     [string]$OutputDirectory,
     [switch]$SkipTests,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$SkipInstallerExe
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +19,23 @@ function Require-Command([string]$Name, [string]$InstallHint) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "$Name was not found. $InstallHint"
     }
+}
+
+function Find-InnoSetupCompiler {
+    $command = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    foreach ($candidate in @(
+        "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    )) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+    return $null
 }
 
 Require-Command "cargo.exe" "Install Rust from https://rustup.rs"
@@ -56,18 +74,24 @@ try {
 
     $ServerPackage = Join-Path $OutputDirectory "liaison-server-windows"
     $ClientPackage = Join-Path $OutputDirectory "liaison-client-windows"
+    $UnifiedPackage = Join-Path $OutputDirectory "xliaison-windows"
     $ServerZip = Join-Path $OutputDirectory "liaison-server-windows.zip"
     $ClientZip = Join-Path $OutputDirectory "liaison-client-windows.zip"
+    $UnifiedZip = Join-Path $OutputDirectory "xliaison-windows.zip"
+    $SetupExe = Join-Path $OutputDirectory "xLiaison-Setup-Windows.exe"
 
-    Remove-Item $ServerPackage, $ClientPackage -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item $ServerZip, $ClientZip -Force -ErrorAction SilentlyContinue
+    Remove-Item $ServerPackage, $ClientPackage, $UnifiedPackage -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $ServerZip, $ClientZip, $UnifiedZip, $SetupExe -Force -ErrorAction SilentlyContinue
 
     New-Item -ItemType Directory -Force -Path `
         (Join-Path $ServerPackage "bin"), `
         (Join-Path $ServerPackage "scripts"), `
         (Join-Path $ServerPackage "config"), `
         (Join-Path $ClientPackage "bin"), `
-        (Join-Path $ClientPackage "scripts") | Out-Null
+        (Join-Path $ClientPackage "scripts"), `
+        (Join-Path $UnifiedPackage "bin"), `
+        (Join-Path $UnifiedPackage "scripts"), `
+        (Join-Path $UnifiedPackage "config") | Out-Null
 
     Write-Step "Creating the Windows server package"
     Copy-Item "target\release\liaison-service.exe" (Join-Path $ServerPackage "bin")
@@ -134,13 +158,82 @@ Worker management and the workspace terminal are integrated into Liaison Client.
 Tailscale runs as a background service without opening its GUI.
 '@ | Set-Content -Path (Join-Path $ClientPackage "README.txt") -Encoding ASCII
 
+    Write-Step "Creating the unified xLiaison package"
+    Copy-Item "target\release\liaison-service.exe" (Join-Path $UnifiedPackage "bin")
+    Copy-Item "target\release\liaison-cli.exe" (Join-Path $UnifiedPackage "bin")
+    Copy-Item "target\release\liaison-desktop.exe" (Join-Path $UnifiedPackage "bin")
+    Copy-Item "config\liaison.example.json" (Join-Path $UnifiedPackage "config")
+    foreach ($script in @(
+        "bootstrap-dependencies.ps1",
+        "install-server-bundle.ps1",
+        "install-client-bundle.ps1",
+        "install-xliaison.ps1",
+        "setup-server.ps1",
+        "setup-client.ps1",
+        "start-client.ps1",
+        "repair-windows-server.ps1",
+        "start-server-windows.ps1"
+    )) {
+        Copy-Item (Join-Path "scripts" $script) (Join-Path $UnifiedPackage "scripts")
+    }
+    @'
+@echo off
+cd /d "%~dp0"
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-xliaison.ps1"
+set XLIAISON_EXIT=%ERRORLEVEL%
+if not "%XLIAISON_EXIT%"=="0" pause
+exit /b %XLIAISON_EXIT%
+'@ | Set-Content -Path (Join-Path $UnifiedPackage "Install xLiaison.cmd") -Encoding ASCII
+    @'
+xLiaison for Windows
+
+Use xLiaison-Setup-Windows.exe for the standard guided setup.
+The setup lets you choose Client, Server, or both, then automates dependency
+installation, configuration, startup registration, and connection checks.
+
+The ZIP fallback can be used without Inno Setup:
+1. Extract xliaison-windows.zip completely.
+2. Double-click Install xLiaison.cmd.
+3. Choose the role and approve the administrator prompt.
+
+Server setup may require one Windows restart when WSL is enabled for the first
+time. Setup is cached and registered to continue after the next sign-in.
+A one-time Tailscale browser login may also be required. When Server and Client
+are installed together, the generated connection information is imported into
+the Client automatically.
+
+Setup log: %TEMP%\xLiaisonSetup.log
+Server install log: %TEMP%\LiaisonServerInstall.log
+'@ | Set-Content -Path (Join-Path $UnifiedPackage "README.txt") -Encoding UTF8
+
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
     Compress-Archive -Path (Join-Path $ServerPackage "*") -DestinationPath $ServerZip -CompressionLevel Optimal
     Compress-Archive -Path (Join-Path $ClientPackage "*") -DestinationPath $ClientZip -CompressionLevel Optimal
+    Compress-Archive -Path (Join-Path $UnifiedPackage "*") -DestinationPath $UnifiedZip -CompressionLevel Optimal
+
+    if (-not $SkipInstallerExe) {
+        $iscc = Find-InnoSetupCompiler
+        if ($iscc) {
+            Write-Step "Building xLiaison Setup.exe"
+            & $iscc "installer\xliaison.iss"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Inno Setup failed to build xLiaison-Setup-Windows.exe."
+            }
+            if (-not (Test-Path $SetupExe)) {
+                throw "The xLiaison setup executable was not created: $SetupExe"
+            }
+        } else {
+            Write-Warning "Inno Setup 6 was not found. xliaison-windows.zip was created, but Setup.exe was skipped."
+        }
+    }
 
     Write-Host "`nDistribution packages created." -ForegroundColor Green
     Write-Host "Server: $ServerZip"
     Write-Host "Client: $ClientZip"
+    Write-Host "Unified ZIP: $UnifiedZip"
+    if (Test-Path $SetupExe) {
+        Write-Host "Unified setup: $SetupExe"
+    }
 } finally {
     Pop-Location
 }
