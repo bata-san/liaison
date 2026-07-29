@@ -24,6 +24,9 @@ jobs:
         run: |
           $files = @(
             "scripts/bootstrap-dependencies.ps1",
+            "scripts/setup-progress.ps1",
+            "scripts/wsl-install-fallback.ps1",
+            "scripts/wsl-install-direct.ps1",
             "scripts/install-client-bundle.ps1",
             "scripts/install-server-bundle.ps1",
             "scripts/setup-client.ps1",
@@ -72,6 +75,10 @@ jobs:
       - name: Install setup frontend dependencies
         working-directory: apps/liaison-installer
         run: npm install
+
+      - name: Validate setup frontend
+        working-directory: apps/liaison-installer
+        run: npm run build
 
       - name: Build unified MSI
         working-directory: apps/liaison-installer
