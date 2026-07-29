@@ -19,7 +19,6 @@ function Invoke-LiaisonNativeCommand {
         [Parameter(Mandatory = $true)][string]$Executable,
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
-
     $oldPreference = $ErrorActionPreference
     $raw = @()
     $code = -1
@@ -32,7 +31,6 @@ function Invoke-LiaisonNativeCommand {
     } finally {
         $ErrorActionPreference = $oldPreference
     }
-
     $output = @()
     foreach ($item in $raw) {
         $line = (([string]$item) -replace "\x00", "").Trim()
@@ -41,25 +39,18 @@ function Invoke-LiaisonNativeCommand {
             Write-LiaisonUnifiedLog ("COMMAND|{0}|{1}" -f (Split-Path -Leaf $Executable), $line)
         }
     }
-
-    return [pscustomobject]@{
-        ExitCode = $code
-        Output = $output
-    }
+    return [pscustomobject]@{ ExitCode = $code; Output = $output }
 }
 
 function Get-LiaisonSafeTailscaleIPv4([string]$Executable) {
     $result = Invoke-LiaisonNativeCommand -Executable $Executable -Arguments @("ip", "-4")
     if ($result.ExitCode -ne 0) { return $null }
-
     foreach ($line in $result.Output) {
         $candidate = ([string]$line).Trim()
         $parsed = $null
         if ([Net.IPAddress]::TryParse($candidate, [ref]$parsed)) {
             $bytes = $parsed.GetAddressBytes()
-            if ($bytes.Length -eq 4 -and $bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127) {
-                return $candidate
-            }
+            if ($bytes.Length -eq 4 -and $bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127) { return $candidate }
         }
     }
     return $null
@@ -67,11 +58,10 @@ function Get-LiaisonSafeTailscaleIPv4([string]$Executable) {
 
 function Connect-LiaisonTailscale {
     param([switch]$InstallIfMissing)
-
-    Write-LiaisonProgress 58 "Tailscaleを確認" "Tailscale本体とWindowsサービスを確認しています。"
+    Write-LiaisonProgress 58 "Tailscale check" "Checking the Tailscale executable and Windows service."
     $tailscale = Get-LiaisonTailscaleExe
     if (-not $tailscale -and $InstallIfMissing) {
-        Write-LiaisonProgress 61 "Tailscaleをインストール" "公式MSIを取得してバックグラウンドサービスを導入しています。"
+        Write-LiaisonProgress 61 "Tailscale install" "Downloading and installing the official Tailscale MSI."
         $tailscale = Install-LiaisonTailscale
     }
     if (-not $tailscale) {
@@ -79,54 +69,46 @@ function Connect-LiaisonTailscale {
         Write-Warning "Tailscale is not installed. Liaison setup will continue."
         return $null
     }
-
-    Write-LiaisonProgress 64 "Tailscaleサービスを起動" "サービスを自動起動に設定しています。"
+    Write-LiaisonProgress 64 "Tailscale service" "Starting the Tailscale Windows service."
     Set-Service -Name Tailscale -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service -Name Tailscale -ErrorAction SilentlyContinue
-
     $ip = Get-LiaisonSafeTailscaleIPv4 $tailscale
     if ($ip) {
-        Write-LiaisonProgress 70 "Tailscale接続完了" "接続用IP $ip を確認しました。"
+        Write-LiaisonProgress 70 "Tailscale ready" ("Tailscale IP: " + $ip)
         return $ip
     }
-
-    Write-LiaisonProgress 66 "Tailscale認証を開始" "ブラウザー認証URLを取得しています。"
+    Write-LiaisonProgress 66 "Tailscale authentication" "Requesting browser authentication."
     $up = Invoke-LiaisonNativeCommand -Executable $tailscale -Arguments @("up", "--unattended=true", "--timeout=10s")
     $combined = [string]::Join("`n", [string[]]$up.Output)
     $match = [regex]::Match($combined, "https://login\.tailscale\.com/\S+")
     if ($match.Success) {
-        $loginUrl = $match.Value.TrimEnd([char[]]".,;)]")
+        $loginUrl = $match.Value
         try {
             Start-Process $loginUrl | Out-Null
-            Write-LiaisonProgress 67 "ブラウザーで認証" "開いたTailscale画面でログインしてください。"
+            Write-LiaisonProgress 67 "Tailscale browser login" "Complete login in the browser window."
         } catch {
-            Write-LiaisonUnifiedLog ("WARNING|Tailscale login URL: " + $loginUrl)
+            Write-LiaisonUnifiedLog ("WARNING|Tailscale login address: " + $loginUrl)
         }
     } else {
-        Write-LiaisonProgress 67 "Tailscaleログイン待ち" "Tailscaleアプリからログインしてください。"
+        Write-LiaisonProgress 67 "Tailscale login pending" "Open the Tailscale app and complete login."
     }
-
     for ($attempt = 1; $attempt -le 90; $attempt++) {
         Start-Sleep -Seconds 2
         $ip = Get-LiaisonSafeTailscaleIPv4 $tailscale
         if ($ip) {
-            Write-LiaisonProgress 70 "Tailscale接続完了" "接続用IP $ip を確認しました。"
+            Write-LiaisonProgress 70 "Tailscale ready" ("Tailscale IP: " + $ip)
             return $ip
         }
         if (($attempt % 5) -eq 0) {
             $seconds = $attempt * 2
-            $percent = 67 + [Math]::Min(2, [Math]::Floor($seconds / 60))
-            Write-LiaisonProgress $percent "Tailscaleログイン待ち" "認証を待っています。経過 ${seconds}秒 / 最大180秒"
+            Write-LiaisonProgress 68 "Tailscale login pending" ("Waiting for login: " + $seconds + " / 180 seconds")
         }
     }
-
     Write-LiaisonUnifiedLog "LIAISON_TAILSCALE_LOGIN_REQUIRED"
-    Write-LiaisonProgress 70 "Tailscaleログインは後で完了可能" "Liaisonの設定を続行します。"
+    Write-LiaisonProgress 70 "Tailscale login deferred" "Liaison setup will continue without a current Tailscale IP."
     Write-Warning "Tailscale login is still pending. Liaison setup will continue."
     return $null
 }
 
 $wslDirectPath = Join-Path $PSScriptRoot "wsl-install-direct.ps1"
-if (Test-Path -LiteralPath $wslDirectPath -PathType Leaf) {
-    . $wslDirectPath
-}
+if (Test-Path -LiteralPath $wslDirectPath -PathType Leaf) { . $wslDirectPath }

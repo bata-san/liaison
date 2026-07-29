@@ -35,21 +35,21 @@ function Publish-LiaisonLiveLine([string]$Source, [string]$Line) {
     Write-LiaisonUnifiedLog ("DETAIL|" + $Source + "|" + $clean)
 
     if ($clean -match "Enabling Windows feature") {
-        Write-LiaisonProgress 20 "WSL機能を有効化" $clean
+        Write-LiaisonProgress 20 "WSL feature enable" $clean
     } elseif ($clean -match "Installing the .* WSL distribution") {
-        Write-LiaisonProgress 26 "Ubuntuを準備" $clean
+        Write-LiaisonProgress 26 "Ubuntu setup" $clean
     } elseif ($clean -match "Installing Docker Engine") {
-        Write-LiaisonProgress 38 "Dockerをインストール" $clean
+        Write-LiaisonProgress 38 "Docker install" $clean
     } elseif ($clean -match "apt-get update|Get:|Fetched") {
-        Write-LiaisonProgress 44 "Ubuntuパッケージを取得" $clean
+        Write-LiaisonProgress 44 "Ubuntu packages" $clean
     } elseif ($clean -match "docker.io|docker-ce|dockerd") {
-        Write-LiaisonProgress 50 "Dockerを構成" $clean
+        Write-LiaisonProgress 50 "Docker configuration" $clean
     } elseif ($clean -match "Connecting the Tailscale") {
-        Write-LiaisonProgress 58 "Tailscaleを接続" $clean
+        Write-LiaisonProgress 58 "Tailscale connection" $clean
     } elseif ($clean -match "Liaison Server setup completed|Server installation completed") {
-        Write-LiaisonProgress 78 "Liaison Serviceを導入" $clean
+        Write-LiaisonProgress 78 "Liaison Service" $clean
     } elseif ($clean -match "startup|Scheduled Task|repair") {
-        Write-LiaisonProgress 82 "Windows自動起動を設定" $clean
+        Write-LiaisonProgress 82 "Windows startup" $clean
     }
 }
 
@@ -71,7 +71,7 @@ if ($LocalOnly) { $parts += "-LocalOnly" }
 if ($SkipDependencyInstall) { $parts += "-SkipDependencyInstall" }
 $argumentLine = $parts -join " "
 
-Write-LiaisonProgress 16 "サーバー構成を開始" "WSL、Ubuntu、Docker、Tailscale、Liaison Serviceを順番に設定します。"
+Write-LiaisonProgress 16 "Server setup" "Configuring WSL, Ubuntu, Docker, Tailscale, and Liaison Service."
 $process = Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -PassThru -ArgumentList $argumentLine -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
 $installCount = 0
 $stdoutCount = 0
@@ -103,11 +103,12 @@ while (-not $process.HasExited) {
     $process.Refresh()
 }
 
-foreach ($source in @(
+$finalSources = @(
     @{ Name = "PowerShell"; Path = $InstallLog; Count = $installCount },
     @{ Name = "stdout"; Path = $stdoutLog; Count = $stdoutCount },
     @{ Name = "stderr"; Path = $stderrLog; Count = $stderrCount }
-)) {
+)
+foreach ($source in $finalSources) {
     if (Test-Path -LiteralPath $source.Path) {
         $lines = @(Get-Content -LiteralPath $source.Path -ErrorAction SilentlyContinue)
         for ($index = [int]$source.Count; $index -lt $lines.Count; $index++) {
@@ -117,7 +118,7 @@ foreach ($source in @(
 }
 
 if ($process.ExitCode -eq 0) {
-    Write-LiaisonProgress 86 "サーバー構成完了" "WSL、Docker、Liaison Serviceの設定が完了しました。"
+    Write-LiaisonProgress 86 "Server ready" "WSL, Docker, and Liaison Service configuration completed."
 } else {
     Write-LiaisonUnifiedLog ("Installation failed: Server core exited with code " + $process.ExitCode + ".")
 }
