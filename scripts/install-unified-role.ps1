@@ -27,7 +27,21 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function ConvertFrom-LiaisonExtendedPath([string]$Path) {
+    if (-not $Path) {
+        return $Path
+    }
+    if ($Path.StartsWith("\\?\UNC\", [StringComparison]::OrdinalIgnoreCase)) {
+        return "\\" + $Path.Substring(8)
+    }
+    if ($Path.StartsWith("\\?\", [StringComparison]::OrdinalIgnoreCase)) {
+        return $Path.Substring(4)
+    }
+    return $Path
+}
+
 function Get-LiaisonShortPath([string]$Path) {
+    $Path = ConvertFrom-LiaisonExtendedPath $Path
     try {
         if (-not ("LiaisonUnifiedShortPath" -as [type])) {
             Add-Type -TypeDefinition @'
@@ -82,6 +96,8 @@ function New-LiaisonShortcut(
     $shortcut.Save()
 }
 
+$PayloadRoot = ConvertFrom-LiaisonExtendedPath $PayloadRoot
+$DashboardPath = ConvertFrom-LiaisonExtendedPath $DashboardPath
 Write-UnifiedLog "Unified setup entered. Role: $Role"
 
 if (-not (Test-Administrator)) {
@@ -121,17 +137,17 @@ if (-not (Test-Administrator)) {
 
 try {
     Write-UnifiedLog "Administrator unified setup started."
-    if (-not (Test-Path $PayloadRoot)) {
+    if (-not (Test-Path -LiteralPath $PayloadRoot)) {
         throw "The staged setup payload is missing: $PayloadRoot"
     }
-    if (-not (Test-Path $DashboardPath)) {
+    if (-not (Test-Path -LiteralPath $DashboardPath -PathType Leaf)) {
         throw "The bundled Liaison application is missing: $DashboardPath"
     }
 
     $scripts = Join-Path $PayloadRoot "scripts"
     if ($Role -eq "server") {
         $serverInstaller = Join-Path $scripts "install-server-bundle.ps1"
-        if (-not (Test-Path $serverInstaller)) {
+        if (-not (Test-Path -LiteralPath $serverInstaller -PathType Leaf)) {
             throw "The server installer is missing: $serverInstaller"
         }
 
@@ -160,7 +176,7 @@ try {
         }
     } else {
         $bootstrap = Join-Path $scripts "bootstrap-dependencies.ps1"
-        if (-not (Test-Path $bootstrap)) {
+        if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
             throw "The dependency bootstrap script is missing: $bootstrap"
         }
         . $bootstrap
