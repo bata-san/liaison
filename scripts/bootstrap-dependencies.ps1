@@ -111,11 +111,119 @@ function Connect-LiaisonTailscale {
 }
 
 function Get-LiaisonWslDistributions {
-    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+    $registryRoot = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Lxss"
+    if (-not (Test-Path $registryRoot)) {
         return @()
     }
-    $items = & wsl.exe --list --quiet 2>$null
-    return @($items | ForEach-Object { (([string]$_) -replace "\x00", "").Trim() } | Where-Object { $_ })
+
+    return @(
+        Get-ChildItem -Path $registryRoot -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try {
+                    $name = (Get-ItemProperty -Path $_.PSPath -Name DistributionName -ErrorAction Stop).DistributionName
+                    if ($name) { ([string]$name).Trim() }
+                } catch {
+                    # Ignore incomplete WSL registrations.
+                }
+            } |
+            Where-Object { $_ } |
+            Sort-Object -Unique
+    )
+}
+
+function Ensure-LiaisonWslFeatures {
+    $features = @(
+        "Microsoft-Windows-Subsystem-Linux",
+        "VirtualMachinePlatform"
+    )
+    $restartRequired = $false
+
+    foreach ($featureName in $features) {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction Stop
+        if ($feature.State -eq "Enabled") {
+            continue
+        }
+        if ($feature.State -match "Pending") {
+            $restartRequired = $true
+            continue
+        }
+
+        Write-LiaisonDependencyStep "Enabling Windows feature $featureName"
+        Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart -ErrorAction Stop | Out-Null
+        $restartRequired = $true
+    }
+
+    if ($restartRequired) {
+        throw "Required WSL components were enabled. Restart Windows, then run Install Liaison Server.cmd again."
+    }
+
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        throw "wsl.exe is unavailable even though the WSL Windows features are enabled. Restart Windows and run setup again."
+    }
+}
+
+function Invoke-LiaisonWslInstall {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & "$env:SystemRoot\System32\wsl.exe" @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    foreach ($item in @($output)) {
+        $line = (([string]$item) -replace "\x00", "").Trim()
+        if ($line) {
+            Write-Host $line
+        }
+    }
+    return [int]$exitCode
+}
+
+function Ensure-LiaisonWslDistribution {
+    param([Parameter(Mandatory = $true)][string]$Distribution)
+
+    if ((Get-LiaisonWslDistributions) -contains $Distribution) {
+        return
+    }
+
+    Write-LiaisonDependencyStep "Installing the $Distribution WSL distribution"
+    $exitCode = Invoke-LiaisonWslInstall -Arguments @(
+        "--install", "-d", $Distribution, "--no-launch", "--web-download"
+    )
+    if ($exitCode -ne 0) {
+        $exitCode = Invoke-LiaisonWslInstall -Arguments @(
+            "--install", "-d", $Distribution, "--no-launch"
+        )
+    }
+    if ($exitCode -ne 0) {
+        throw "The $Distribution WSL distribution could not be installed (exit code $exitCode). The PC may block WSL or Microsoft Store downloads."
+    }
+
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        if ((Get-LiaisonWslDistributions) -contains $Distribution) {
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+    if ((Get-LiaisonWslDistributions) -notcontains $Distribution) {
+        throw "The $Distribution WSL distribution installation is pending. Restart Windows, then run Install Liaison Server.cmd again."
+    }
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & "$env:SystemRoot\System32\wsl.exe" -d $Distribution -u root -- sh -lc "true"
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "The $Distribution WSL distribution was installed but could not be initialized. Restart Windows and run setup again."
+    }
 }
 
 function Invoke-LiaisonWslRoot {
