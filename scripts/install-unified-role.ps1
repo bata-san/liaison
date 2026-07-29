@@ -15,10 +15,18 @@ $ErrorActionPreference = "Stop"
 function Write-UnifiedLog([string]$Message) {
     try {
         $line = "{0} {1}" -f ([DateTimeOffset]::Now.ToString("o")), $Message
-        Add-Content -Path $UnifiedLogPath -Value $line -Encoding UTF8
+        Add-Content -LiteralPath $UnifiedLogPath -Value $line -Encoding UTF8
     } catch {
         # Logging must not block setup.
     }
+}
+
+function Write-UnifiedProgress(
+    [ValidateRange(0, 100)][int]$Percent,
+    [string]$Stage,
+    [string]$Detail
+) {
+    Write-UnifiedLog ("PROGRESS|{0}|{1}|{2}" -f $Percent, $Stage, $Detail)
 }
 
 function Test-Administrator {
@@ -98,7 +106,9 @@ function New-LiaisonShortcut(
 
 $PayloadRoot = ConvertFrom-LiaisonExtendedPath $PayloadRoot
 $DashboardPath = ConvertFrom-LiaisonExtendedPath $DashboardPath
+$env:LIAISON_UNIFIED_LOG_PATH = $UnifiedLogPath
 Write-UnifiedLog "Unified setup entered. Role: $Role"
+Write-UnifiedProgress 2 "セットアップを起動" "役割と同梱データの場所を確認しています。"
 
 if (-not (Test-Administrator)) {
     try {
@@ -120,6 +130,7 @@ if (-not (Test-Administrator)) {
         $argumentLine = $argumentParts -join " "
 
         Write-UnifiedLog "Requesting administrator elevation."
+        Write-UnifiedProgress 5 "管理者権限を確認" "Windowsの確認画面で「はい」を選択してください。"
         $process = Start-Process `
             -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
             -Verb RunAs `
@@ -137,6 +148,7 @@ if (-not (Test-Administrator)) {
 
 try {
     Write-UnifiedLog "Administrator unified setup started."
+    Write-UnifiedProgress 8 "管理者セットアップを開始" "必要なWindows機能とサービスを変更できる状態になりました。"
     if (-not (Test-Path -LiteralPath $PayloadRoot)) {
         throw "The staged setup payload is missing: $PayloadRoot"
     }
@@ -144,7 +156,13 @@ try {
         throw "The bundled Liaison application is missing: $DashboardPath"
     }
 
+    Write-UnifiedProgress 12 "同梱ファイルを検証" "Liaison本体、PowerShellスクリプト、設定テンプレートを確認しました。"
     $scripts = Join-Path $PayloadRoot "scripts"
+    $progressScript = Join-Path $scripts "setup-progress.ps1"
+    if (-not (Test-Path -LiteralPath $progressScript -PathType Leaf)) {
+        throw "The setup progress helper is missing: $progressScript"
+    }
+
     if ($Role -eq "server") {
         $serverInstaller = Join-Path $scripts "install-server-bundle.ps1"
         if (-not (Test-Path -LiteralPath $serverInstaller -PathType Leaf)) {
@@ -159,13 +177,15 @@ try {
         if ($LocalOnly) { $arguments.LocalOnly = $true }
 
         Write-UnifiedLog "Starting server dependency and service setup."
+        Write-UnifiedProgress 16 "サーバー構成を開始" "WSL、Ubuntu、Docker、ネットワーク、Liaison Serviceを順番に設定します。"
         & $serverInstaller @arguments
         if ($LASTEXITCODE -ne 0) {
             throw "Server setup failed with exit code $LASTEXITCODE."
         }
 
+        Write-UnifiedProgress 88 "接続情報を取り込み" "このPCからサーバーを管理するための接続設定を確認しています。"
         $connectionSource = Join-Path $env:USERPROFILE "Desktop\liaison-client.json"
-        if (Test-Path $connectionSource) {
+        if (Test-Path -LiteralPath $connectionSource) {
             $connectionDirectory = Join-Path $env:APPDATA "Liaison"
             $connectionTarget = Join-Path $connectionDirectory "client.json"
             New-Item -ItemType Directory -Force -Path $connectionDirectory | Out-Null
@@ -180,8 +200,15 @@ try {
             throw "The dependency bootstrap script is missing: $bootstrap"
         }
         . $bootstrap
+        . $progressScript
+
+        Write-UnifiedProgress 18 "クライアント構成を開始" "TailscaleとLiaisonの起動項目を設定します。"
         Add-LiaisonToolPaths | Out-Null
-        $tailscaleIp = Connect-LiaisonTailscale -InstallIfMissing
+        $tailscaleIp = Connect-LiaisonTailscaleInteractive `
+            -InstallIfMissing `
+            -WaitForLoginSeconds 180 `
+            -ProgressStart 22 `
+            -ProgressEnd 78
         if ($tailscaleIp) {
             Write-UnifiedLog "Tailscale is ready at $tailscaleIp."
         } else {
@@ -189,6 +216,7 @@ try {
         }
     }
 
+    Write-UnifiedProgress 92 "ショートカットを作成" "デスクトップとスタートメニューへLiaisonを登録しています。"
     $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Liaison.lnk"
     $desktop = Join-Path $env:USERPROFILE "Desktop\Liaison.lnk"
     New-LiaisonShortcut $startMenu $DashboardPath
@@ -201,6 +229,7 @@ try {
         Remove-Item $oldShortcut -Force -ErrorAction SilentlyContinue
     }
 
+    Write-UnifiedProgress 100 "セットアップ完了" "Liaisonを起動できる状態になりました。"
     Write-UnifiedLog "Unified setup completed successfully for role $Role."
     exit 0
 } catch {
