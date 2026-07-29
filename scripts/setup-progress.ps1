@@ -58,10 +58,10 @@ function Get-LiaisonSafeTailscaleIPv4([string]$Executable) {
 
 function Connect-LiaisonTailscale {
     param([switch]$InstallIfMissing)
-    Write-LiaisonProgress 58 "Tailscale check" "Checking the Tailscale executable and Windows service."
+    Write-LiaisonProgress 58 "Tailscaleを確認中" "安全なリモート接続に必要なTailscaleを確認しています。"
     $tailscale = Get-LiaisonTailscaleExe
     if (-not $tailscale -and $InstallIfMissing) {
-        Write-LiaisonProgress 61 "Tailscale install" "Downloading and installing the official Tailscale MSI."
+        Write-LiaisonProgress 61 "Tailscaleを導入中" "公式インストーラーを取得してWindowsへ導入しています。操作は不要です。"
         $tailscale = Install-LiaisonTailscale
     }
     if (-not $tailscale) {
@@ -69,15 +69,15 @@ function Connect-LiaisonTailscale {
         Write-Warning "Tailscale is not installed. Liaison setup will continue."
         return $null
     }
-    Write-LiaisonProgress 64 "Tailscale service" "Starting the Tailscale Windows service."
+    Write-LiaisonProgress 64 "Tailscaleを起動中" "Windowsサービスを起動し、自動起動を設定しています。"
     Set-Service -Name Tailscale -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service -Name Tailscale -ErrorAction SilentlyContinue
     $ip = Get-LiaisonSafeTailscaleIPv4 $tailscale
     if ($ip) {
-        Write-LiaisonProgress 70 "Tailscale ready" ("Tailscale IP: " + $ip)
+        Write-LiaisonProgress 70 "Tailscaleの接続完了" ("接続用IP: " + $ip)
         return $ip
     }
-    Write-LiaisonProgress 66 "Tailscale authentication" "Requesting browser authentication."
+    Write-LiaisonProgress 66 "Tailscaleの認証を開始" "ブラウザーでログイン画面を開きます。"
     $up = Invoke-LiaisonNativeCommand -Executable $tailscale -Arguments @("up", "--unattended=true", "--timeout=10s")
     $combined = [string]::Join("`n", [string[]]$up.Output)
     $match = [regex]::Match($combined, "https://login\.tailscale\.com/\S+")
@@ -85,27 +85,27 @@ function Connect-LiaisonTailscale {
         $loginUrl = $match.Value
         try {
             Start-Process $loginUrl | Out-Null
-            Write-LiaisonProgress 67 "Tailscale browser login" "Complete login in the browser window."
+            Write-LiaisonProgress 67 "ブラウザーでログイン" "開いた画面でTailscaleへログインしてください。完了後は自動で続行します。"
         } catch {
             Write-LiaisonUnifiedLog ("WARNING|Tailscale login address: " + $loginUrl)
         }
     } else {
-        Write-LiaisonProgress 67 "Tailscale login pending" "Open the Tailscale app and complete login."
+        Write-LiaisonProgress 67 "Tailscaleのログイン待ち" "通知領域のTailscaleを開いてログインしてください。"
     }
     for ($attempt = 1; $attempt -le 90; $attempt++) {
         Start-Sleep -Seconds 2
         $ip = Get-LiaisonSafeTailscaleIPv4 $tailscale
         if ($ip) {
-            Write-LiaisonProgress 70 "Tailscale ready" ("Tailscale IP: " + $ip)
+            Write-LiaisonProgress 70 "Tailscaleの接続完了" ("接続用IP: " + $ip)
             return $ip
         }
         if (($attempt % 5) -eq 0) {
             $seconds = $attempt * 2
-            Write-LiaisonProgress 68 "Tailscale login pending" ("Waiting for login: " + $seconds + " / 180 seconds")
+            Write-LiaisonProgress 68 "Tailscaleのログイン待ち" ("ログイン完了を待っています: " + $seconds + " / 180秒")
         }
     }
     Write-LiaisonUnifiedLog "LIAISON_TAILSCALE_LOGIN_REQUIRED"
-    Write-LiaisonProgress 70 "Tailscale login deferred" "Liaison setup will continue without a current Tailscale IP."
+    Write-LiaisonProgress 70 "Tailscaleは後で設定可能" "Liaisonの導入は続行します。セットアップ後にTailscaleへログインできます。"
     Write-Warning "Tailscale login is still pending. Liaison setup will continue."
     return $null
 }
