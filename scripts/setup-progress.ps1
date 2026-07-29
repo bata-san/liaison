@@ -154,7 +154,9 @@ function Connect-LiaisonTailscaleInteractive {
     return $null
 }
 
-$wslFallbackPath = Join-Path $PSScriptRoot "wsl-install-fallback.ps1"
-if (Test-Path -LiteralPath $wslFallbackPath -PathType Leaf) {
-    . $wslFallbackPath
+foreach ($wslHelperName in @("wsl-install-fallback.ps1", "wsl-install-direct.ps1")) {
+    $wslHelperPath = Join-Path $PSScriptRoot $wslHelperName
+    if (Test-Path -LiteralPath $wslHelperPath -PathType Leaf) {
+        . $wslHelperPath
+    }
 }
