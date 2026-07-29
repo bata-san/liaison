@@ -1,0 +1,1 @@
+Trigger Windows installer validation for the WSL 2 virtualization preflight and UTF-16 output decoding fix.
