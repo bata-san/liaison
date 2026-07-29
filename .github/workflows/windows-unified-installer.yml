@@ -19,6 +19,9 @@ jobs:
       - name: Apply WSL transport compatibility fix
         run: python .github/scripts/apply-wsl-transport-fix.py
 
+      - name: Apply actionable installer guidance
+        run: python .github/scripts/apply-installer-guidance-ux.py
+
       - name: Validate unified setup PowerShell
         shell: powershell
         run: |
