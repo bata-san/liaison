@@ -10,11 +10,12 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $LauncherLog = if ($LauncherLogPath) { $LauncherLogPath } else { Join-Path $env:TEMP "LiaisonServerLauncher.log" }
 $InstallLog = if ($InstallLogPath) { $InstallLogPath } else { Join-Path $env:TEMP "LiaisonServerInstall.log" }
+$env:LIAISON_UNIFIED_LOG_PATH = $LauncherLog
 
 function Write-EarlyLog([string]$Message) {
     try {
         $line = "{0} {1}" -f ([DateTimeOffset]::Now.ToString("o")), $Message
-        Add-Content -Path $LauncherLog -Value $line -Encoding UTF8
+        Add-Content -LiteralPath $LauncherLog -Value $line -Encoding UTF8
     } catch {
         # Logging must never prevent setup from continuing.
     }
@@ -71,9 +72,6 @@ Write-EarlyLog "PowerShell installer entered. Script: $PSCommandPath"
 
 if (-not (Test-Administrator)) {
     try {
-        # Managed Windows environments commonly block -EncodedCommand. Use a normal
-        # -File launch instead. Prefer the DOS 8.3 path so spaces, Japanese text and
-        # parentheses cannot be reinterpreted by the elevated command line parser.
         $elevationScript = Get-LiaisonShortPath $PSCommandPath
         $argumentParts = @(
             "-NoLogo",
@@ -115,22 +113,32 @@ try {
     }
 
     $bootstrapPath = Join-Path $PSScriptRoot "bootstrap-dependencies.ps1"
-    if (-not (Test-Path $bootstrapPath)) {
+    $progressPath = Join-Path $PSScriptRoot "setup-progress.ps1"
+    if (-not (Test-Path -LiteralPath $bootstrapPath -PathType Leaf)) {
         throw "Dependency bootstrap script is missing: $bootstrapPath"
     }
+    if (-not (Test-Path -LiteralPath $progressPath -PathType Leaf)) {
+        throw "Setup progress helper is missing: $progressPath"
+    }
     . $bootstrapPath
+    . $progressPath
 
-    # Native WSL failures must include useful diagnostics rather than a generic error.
     function Invoke-LiaisonWslRoot {
         param(
             [Parameter(Mandatory = $true)][string]$Distribution,
             [Parameter(Mandatory = $true)][string]$Script
         )
 
+        $normalizedScript = $Script.Replace("`r`n", "`n").Replace("`r", "`n")
+        $encodedScript = [Convert]::ToBase64String(
+            [Text.UTF8Encoding]::new($false).GetBytes($normalizedScript)
+        )
+        $transportCommand = "printf %s $encodedScript | base64 -d | sh"
+
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = "Continue"
-            $rawOutput = & "$env:SystemRoot\System32\wsl.exe" -d $Distribution -u root --exec sh -lc $Script 2>&1
+            $rawOutput = & "$env:SystemRoot\System32\wsl.exe" -d $Distribution -u root --exec sh -lc $transportCommand 2>&1
             $nativeExitCode = $LASTEXITCODE
         } finally {
             $ErrorActionPreference = $previousErrorActionPreference
@@ -143,6 +151,7 @@ try {
         )
         foreach ($line in $cleanOutput) {
             Write-Host $line
+            Write-EarlyLog ("WSL | " + $line)
         }
 
         if ($nativeExitCode -ne 0) {
@@ -152,7 +161,6 @@ try {
         }
     }
 
-    # A missing Docker command is an expected pre-installation state, not an error.
     function Test-LiaisonWslDocker {
         param([Parameter(Mandatory = $true)][string]$Distribution)
 
@@ -170,12 +178,11 @@ try {
         return $nativeExitCode -eq 0
     }
 
-    # Provision Docker without Docker Desktop. Ubuntu's own package is preferred because
-    # managed networks often block download.docker.com while allowing Ubuntu mirrors.
     function Install-LiaisonDockerEngineInWsl {
         param([Parameter(Mandatory = $true)][string]$Distribution)
 
         Write-LiaisonDependencyStep "Installing Docker Engine inside WSL"
+        Write-LiaisonProgress 38 "Dockerをインストール" "Ubuntuパッケージ一覧を更新し、Docker Engineを導入しています。"
         Invoke-LiaisonWslRoot -Distribution $Distribution -Script @'
 set -eu
 export DEBIAN_FRONTEND=noninteractive
@@ -189,8 +196,6 @@ if ! command -v apt-get >/dev/null 2>&1; then
   exit 41
 fi
 
-# Remove a possibly incomplete source left by an earlier installer attempt. The Ubuntu
-# archive package is attempted first and does not require Docker Desktop.
 rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources
 apt-get update -o Acquire::Retries=3
 
@@ -224,17 +229,21 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
             }
         }
 
+        Write-LiaisonProgress 50 "Dockerを起動" "Dockerデーモンを起動し、応答可能になるまで確認しています。"
         Start-LiaisonWslDocker -Distribution $Distribution
         if (-not (Test-LiaisonWslDocker -Distribution $Distribution)) {
             throw "Docker Engine was installed but did not become ready inside WSL distribution '$Distribution'. Check /var/log/liaison-dockerd.log."
         }
+        Write-LiaisonProgress 55 "Docker準備完了" "Docker Engineがコマンドを受け付ける状態になりました。"
     }
 
     Add-LiaisonToolPaths | Out-Null
 
     if (-not $SkipDependencyInstall) {
+        Write-LiaisonProgress 18 "WSL機能を確認" "Windows Subsystem for Linuxと仮想マシンプラットフォームを確認しています。"
         Ensure-LiaisonWslFeatures
 
+        Write-LiaisonProgress 24 "Ubuntuを確認" "利用可能なWSLディストリビューションを検索しています。"
         $installedDistributions = @(
             Get-LiaisonWslDistributions |
                 Where-Object { $_ -and $_ -notlike "docker-desktop*" }
@@ -256,32 +265,43 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
                 Write-EarlyLog "Using installed WSL distribution '$selectedDistribution' instead of '$WslDistribution'."
             } else {
                 Write-Host "Using installed WSL distribution '$selectedDistribution'." -ForegroundColor Green
+                Write-EarlyLog "Using installed WSL distribution '$selectedDistribution'."
             }
             $WslDistribution = [string]$selectedDistribution
         } else {
+            Write-LiaisonProgress 27 "Ubuntuをインストール" "WSL用Ubuntuをダウンロードして初期化しています。"
             Ensure-LiaisonWslDistribution -Distribution $WslDistribution
         }
+        Write-LiaisonProgress 31 "Ubuntu準備完了" "WSLディストリビューション '$WslDistribution' を使用します。"
 
+        Write-LiaisonProgress 34 "Dockerを確認" "既存のDocker Engineが利用できるか確認しています。"
         if (Test-LiaisonWslDocker -Distribution $WslDistribution) {
             Write-Host "Using the existing Docker Engine in WSL distribution '$WslDistribution'." -ForegroundColor Green
+            Write-EarlyLog "Using the existing Docker Engine in WSL distribution '$WslDistribution'."
+            Write-LiaisonProgress 55 "Docker準備完了" "既存のDocker Engineを使用します。"
         } else {
             Install-LiaisonDockerEngineInWsl -Distribution $WslDistribution
         }
 
         if (-not $LocalOnly) {
-            $tailscaleIp = Connect-LiaisonTailscale -InstallIfMissing
+            $tailscaleIp = Connect-LiaisonTailscaleInteractive `
+                -InstallIfMissing `
+                -WaitForLoginSeconds 0 `
+                -ProgressStart 58 `
+                -ProgressEnd 64
             if (-not $tailscaleIp) {
                 Write-Warning "Tailscale is not signed in. The server will be configured as local-only."
+                Write-EarlyLog "Tailscale login is pending; continuing with local-only server configuration."
                 $LocalOnly = $true
             }
+        } else {
+            Write-LiaisonProgress 64 "ローカル接続を使用" "Tailscaleを使用せず、このPC内の接続だけを構成します。"
         }
     }
 
-    # The control server must start before Docker workers. Persistent workers are
-    # started later by the resilient host script, so an image pull or container
-    # failure cannot terminate the Liaison control service.
+    Write-LiaisonProgress 68 "サーバー設定を作成" "Liaison Serviceの設定ファイルと実行パラメーターを準備しています。"
     $templatePath = Join-Path $Root "config\liaison.example.json"
-    if (-not (Test-Path $templatePath)) {
+    if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) {
         throw "Configuration template is missing: $templatePath"
     }
     $template = Get-Content $templatePath -Raw | ConvertFrom-Json
@@ -296,6 +316,7 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
         [Text.UTF8Encoding]::new($false)
     )
 
+    Write-LiaisonProgress 72 "Liaison Serviceを導入" "サーバーバイナリ、設定ファイル、管理用接続情報を配置しています。"
     $setupArguments = @(
         "-NoLogo",
         "-NoProfile",
@@ -311,18 +332,20 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
         throw "The base Liaison Server setup failed with exit code $LASTEXITCODE."
     }
 
+    Write-LiaisonProgress 80 "Windows自動起動を設定" "PC起動後にLiaison ServiceとDockerが復旧するよう登録しています。"
     & (Join-Path $PSScriptRoot "repair-windows-server.ps1") -WslDistribution $WslDistribution
     if ($LASTEXITCODE -ne 0) {
         throw "The resilient Windows startup configuration failed."
     }
 
+    Write-LiaisonProgress 86 "サーバー構成完了" "Liaison Service、Docker、Windows自動起動の設定が完了しました。"
     Write-Host ""
     Write-Host "Liaison Server installation completed." -ForegroundColor Green
     Write-Host "Launcher log: $LauncherLog"
     Write-Host "Installation log: $InstallLog"
     Write-Host "Runtime logs: $env:ProgramData\Liaison\logs"
     $pairingPath = Join-Path $env:USERPROFILE "Desktop\Liaison Pairing Code.txt"
-    if (Test-Path $pairingPath) {
+    if (Test-Path -LiteralPath $pairingPath) {
         Write-Host "Pairing code: $pairingPath"
     }
     Write-EarlyLog "Installation completed successfully."
