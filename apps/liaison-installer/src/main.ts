@@ -16,8 +16,7 @@ interface SetupResult extends SetupState {
   dashboard_path: string | null;
 }
 
-const root = document.querySelector<HTMLDivElement>("#root");
-if (!root) throw new Error("root element was not found");
+const root = document.querySelector<HTMLDivElement>("#root")!;
 
 let state: SetupState = {
   role: null,
