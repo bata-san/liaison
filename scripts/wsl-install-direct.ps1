@@ -98,7 +98,7 @@ function Invoke-LiaisonUbuntuDownload {
                     $received = [Math]::Round($job.BytesTransferred / 1MB, 1)
                     $total = [Math]::Round($job.BytesTotal / 1MB, 1)
                     $detail = $downloadPercent.ToString() + "% - " + $received.ToString() + " MB / " + $total.ToString() + " MB"
-                    Write-LiaisonProgress $overall "Ubuntu download" $detail
+                    Write-LiaisonProgress $overall "Ubuntuをダウンロード中" $detail
                 }
                 Start-Sleep -Seconds 2
             }
@@ -106,65 +106,120 @@ function Invoke-LiaisonUbuntuDownload {
             if ($job) { Remove-BitsTransfer -BitsJob $job -ErrorAction SilentlyContinue }
             Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
             Write-LiaisonUnifiedLog ("WARNING|BITS download failed: " + $_.Exception.Message)
-            Write-LiaisonProgress 28 "Ubuntu download" "Switching to standard HTTPS download."
+            Write-LiaisonProgress 28 "Ubuntuをダウンロード中" "別のHTTPS方式へ切り替えています。操作は不要です。"
             Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $partial -ErrorAction Stop
         }
     } else {
-        Write-LiaisonProgress 28 "Ubuntu download" "Downloading the official image over HTTPS."
+        Write-LiaisonProgress 28 "Ubuntuをダウンロード中" "公式イメージをHTTPSで取得しています。操作は不要です。"
         Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $partial -ErrorAction Stop
     }
     Move-Item -LiteralPath $partial -Destination $Destination -Force
+}
+
+function Get-LiaisonExpectedChecksum {
+    param(
+        [Parameter(Mandatory = $true)][string]$ChecksumUri,
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][string]$DownloadFolder
+    )
+
+    New-Item -ItemType Directory -Force -Path $DownloadFolder | Out-Null
+    $checksumPath = Join-Path $DownloadFolder "SHA256SUMS"
+    $checksumPartial = $checksumPath + ".partial"
+    Remove-Item -LiteralPath $checksumPartial -Force -ErrorAction SilentlyContinue
+
+    Invoke-WebRequest -UseBasicParsing -Uri $ChecksumUri -OutFile $checksumPartial -ErrorAction Stop
+    Move-Item -LiteralPath $checksumPartial -Destination $checksumPath -Force
+
+    $bytes = [IO.File]::ReadAllBytes($checksumPath)
+    if ($bytes.Length -eq 0) {
+        throw "Ubuntuのチェックサム一覧が空でした。ネットワークまたはプロキシ設定を確認してください。"
+    }
+
+    $checksumText = [Text.Encoding]::UTF8.GetString($bytes) -replace "\x00", ""
+    $pattern = "(?im)^([0-9a-f]{64})\s+\*?" + [regex]::Escape($FileName) + "\s*$"
+    $match = [regex]::Match($checksumText, $pattern)
+    if (-not $match.Success) {
+        $preview = (($checksumText -split "`r?`n") | Select-Object -First 4) -join " | "
+        Write-LiaisonUnifiedLog ("Checksum list preview: " + $preview)
+        throw ("Ubuntuの公式チェックサム一覧を解析できませんでした。対象: " + $FileName)
+    }
+
+    return $match.Groups[1].Value.ToLowerInvariant()
 }
 
 function Ensure-LiaisonWslDistribution {
     param([Parameter(Mandatory = $true)][string]$Distribution)
     if ((Get-LiaisonWslDistributions) -contains $Distribution) {
         Write-LiaisonUnifiedLog ("WSL distribution already installed: " + $Distribution)
+        Write-LiaisonProgress 43 "Ubuntuは準備済み" "既存のUbuntuを使用します。"
         return
     }
+
     $fileName = "ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
     $baseUri = "https://cloud-images.ubuntu.com/wsl/releases/noble/current"
     $archiveUri = $baseUri + "/" + $fileName
     $checksumUri = $baseUri + "/SHA256SUMS"
     $downloadFolder = Join-Path $env:ProgramData "Liaison\downloads"
     $archivePath = Join-Path $downloadFolder $fileName
-    Write-LiaisonProgress 26 "Ubuntu image" "Using the official Ubuntu 24.04 LTS image without Microsoft Store."
-    $needDownload = $true
-    if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
-        if ((Get-Item -LiteralPath $archivePath).Length -gt 100MB) { $needDownload = $false }
-    }
-    if ($needDownload) {
-        Invoke-LiaisonUbuntuDownload -Uri $archiveUri -Destination $archivePath
-    } else {
-        Write-LiaisonUnifiedLog ("Using cached Ubuntu image: " + $archivePath)
-    }
-    Write-LiaisonProgress 39 "Ubuntu verification" "Checking the official SHA-256 checksum."
-    $checksumText = (Invoke-WebRequest -UseBasicParsing -Uri $checksumUri -ErrorAction Stop).Content
-    $expected = $null
-    foreach ($checksumLine in ([string]$checksumText -split "`n")) {
-        if ($checksumLine -like ("*" + $fileName + "*")) {
-            $fields = @($checksumLine.Trim() -split "\s+")
-            if ($fields.Count -gt 0) { $expected = ([string]$fields[0]).ToLowerInvariant() }
+
+    Write-LiaisonProgress 26 "Ubuntuを準備中" "Microsoft Storeを使わず、Ubuntu 24.04 LTSの公式イメージを使用します。"
+    Write-LiaisonProgress 27 "安全性を確認中" "公式SHA-256チェックサムを取得しています。操作は不要です。"
+    $expected = Get-LiaisonExpectedChecksum -ChecksumUri $checksumUri -FileName $fileName -DownloadFolder $downloadFolder
+    Write-LiaisonUnifiedLog ("Expected Ubuntu SHA-256: " + $expected)
+
+    $verified = $false
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $needDownload = -not (Test-Path -LiteralPath $archivePath -PathType Leaf)
+        if (-not $needDownload -and (Get-Item -LiteralPath $archivePath).Length -lt 100MB) {
+            Write-LiaisonUnifiedLog "WARNING|Cached Ubuntu image is incomplete and will be replaced."
+            Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+            $needDownload = $true
+        }
+
+        if ($needDownload) {
+            Invoke-LiaisonUbuntuDownload -Uri $archiveUri -Destination $archivePath
+        } else {
+            Write-LiaisonProgress 38 "Ubuntuを確認中" "保存済みの公式イメージを検証しています。"
+            Write-LiaisonUnifiedLog ("Using cached Ubuntu image: " + $archivePath)
+        }
+
+        Write-LiaisonProgress 39 "Ubuntuを検証中" "ダウンロード内容が公式ハッシュと一致するか確認しています。"
+        $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Write-LiaisonUnifiedLog ("Actual Ubuntu SHA-256: " + $actual)
+        if ($actual -eq $expected) {
+            $verified = $true
+            break
+        }
+
+        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        if ($attempt -lt 2) {
+            Write-LiaisonUnifiedLog "WARNING|Ubuntu image checksum mismatch. Downloading a clean copy."
+            Write-LiaisonProgress 28 "Ubuntuを再取得中" "保存済みファイルが不完全だったため、自動で取得し直しています。"
         }
     }
-    if (-not $expected) { throw ("Checksum entry not found for " + $fileName + ".") }
-    $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $expected) {
-        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
-        throw "The downloaded Ubuntu image failed SHA-256 verification."
+
+    if (-not $verified) {
+        throw "Ubuntu公式イメージのSHA-256検証に2回失敗しました。プロキシやセキュリティソフトがダウンロードを変更していないか確認してください。"
     }
     Write-LiaisonUnifiedLog ("Ubuntu SHA-256 verified: " + $actual)
+
     $installLocation = Join-Path $env:LOCALAPPDATA ("Liaison\WSL\" + $Distribution)
+    if (Test-Path -LiteralPath $installLocation) {
+        Remove-Item -LiteralPath $installLocation -Recurse -Force -ErrorAction SilentlyContinue
+    }
     New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
-    Write-LiaisonProgress 40 "Ubuntu import" "Registering the official image as a WSL 2 distribution."
+
+    Write-LiaisonProgress 40 "Ubuntuを登録中" "検証済みイメージをWSL 2へ登録しています。操作は不要です。"
     $importResult = Invoke-LiaisonWslCommand -Arguments @("--import", $Distribution, $installLocation, $archivePath, "--version", "2")
     if ($importResult.ExitCode -ne 0) {
         throw ("Ubuntu import failed with exit code " + $importResult.ExitCode + ". " + (Get-LiaisonWslDetail $importResult))
     }
-    Write-LiaisonProgress 42 "Ubuntu initialization" "Starting Ubuntu as root for the first time."
+
+    Write-LiaisonProgress 42 "Ubuntuを初期化中" "Ubuntuを初めて起動して動作を確認しています。"
     $initResult = Invoke-LiaisonWslCommand -Arguments @("-d", $Distribution, "-u", "root", "--exec", "sh", "-lc", "true")
     if ($initResult.ExitCode -ne 0) {
         throw ("Ubuntu was imported but could not start. Windows may need a restart. " + (Get-LiaisonWslDetail $initResult))
     }
-    Write-LiaisonProgress 43 "Ubuntu ready" "Ubuntu WSL initialization completed."
+    Write-LiaisonProgress 43 "Ubuntuの準備完了" "Ubuntu WSLが正常に起動しました。"
 }
