@@ -1,15 +1,17 @@
+[workspace]
+
 [package]
 name = "liaison-installer"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.77"
 description = "Unified Liaison server and client setup"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri = { version = "2", features = [] }
