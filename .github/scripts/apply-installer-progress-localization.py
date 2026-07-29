@@ -29,6 +29,18 @@ new_error = '''function cleanErrorMessage(value: string): string {
     .replace(/^Installation failed:\s*/i, "")
     .trim();
 
+  if (/LIAISON_FIRMWARE_VIRTUALIZATION_DISABLED/i.test(cleaned)) {
+    return "BIOS/UEFIでCPU仮想化が無効です。Intel VT-x・Intel Virtualization Technology・AMD-V・SVMのいずれかを有効にし、Windowsを起動してから再試行してください。";
+  }
+  if (/LIAISON_CPU_VIRTUALIZATION_UNSUPPORTED/i.test(cleaned)) {
+    return "このCPUまたは仮想マシンでは、WSL 2に必要な仮想化機能が利用できません。仮想マシンの場合はホスト側でネストされた仮想化を有効にしてください。";
+  }
+  if (/LIAISON_HYPERVISOR_RESTART_REQUIRED/i.test(cleaned)) {
+    return "WSL 2に必要なWindows設定を修復しました。Windowsを再起動し、Liaison Setupを開いて同じ役割を再実行してください。";
+  }
+  if (/LIAISON_HYPERVISOR_NOT_RUNNING|HCS_E_HYPERV_NOT_INSTALLED/i.test(cleaned)) {
+    return "Windowsハイパーバイザーが起動していません。仮想マシンプラットフォームとBIOS/UEFIの仮想化設定を確認し、Windowsを再起動してください。";
+  }
   if (/official Ubuntu checksum list could not be parsed/i.test(cleaned)) {
     return "Ubuntuの公式チェックサム一覧を読み取れませんでした。ネットワークまたはプロキシを確認して再試行してください。";
   }
@@ -56,6 +68,11 @@ function localizeProgressStage(value: string): string {
     "Payload check": "同梱ファイルを確認中",
     "Server setup": "サーバー設定を開始",
     "Dependency check": "必要な機能を確認中",
+    "Virtualization check": "仮想化を確認中",
+    "Virtualization repair": "Windows機能を修復中",
+    "Hypervisor repair": "ハイパーバイザーを修復中",
+    "Windows restart": "Windows再起動待ち",
+    "Virtualization ready": "仮想化の準備完了",
     "WSL feature enable": "WSLを有効化中",
     "Ubuntu setup": "Ubuntuを準備中",
     "Ubuntu image": "Ubuntuを準備中",
@@ -96,6 +113,12 @@ function localizeProgressDetail(value: string): string {
   if (/Checking setup files and the current Windows state/i.test(text)) return "必要なファイルとWindowsの状態を確認しています。";
   if (/Checking the bundled Liaison application/i.test(text)) return "Liaison本体とセットアップ部品を確認しています。";
   if (/Preparing WSL, Ubuntu, Docker, Tailscale/i.test(text)) return "WSL、Ubuntu、Docker、Tailscale、Liaisonサービスを順番に準備します。";
+  if (/Checking CPU virtualization, Windows features, and the hypervisor boot setting/i.test(text)) return "CPU仮想化、Windows機能、起動時のハイパーバイザー設定を確認しています。";
+  if (/Enabling Windows feature/i.test(text)) return "WSL 2に必要なWindows機能を有効にしています。";
+  if (/Enabling the Windows hypervisor at startup/i.test(text)) return "Windows起動時にハイパーバイザーが開始されるよう修復しています。";
+  if (/Repairing the Windows hypervisor startup setting/i.test(text)) return "復元された起動設定を修復しています。";
+  if (/Virtualization settings were repaired/i.test(text)) return "仮想化設定を修復しました。Windowsを再起動してください。";
+  if (/Windows hypervisor is running and WSL 2 can be started/i.test(text)) return "Windowsハイパーバイザーが起動しており、WSL 2を開始できます。";
   if (/official Ubuntu 24\.04 LTS image/i.test(text)) return "Microsoft Storeを使わず、Ubuntu 24.04 LTSの公式イメージを使用します。";
   if (/official SHA-256 checksum/i.test(text)) return "公式SHA-256チェックサムを取得しています。操作は不要です。";
   if (/Verifying the saved Ubuntu image/i.test(text)) return "保存済みのUbuntuイメージを検証しています。";
