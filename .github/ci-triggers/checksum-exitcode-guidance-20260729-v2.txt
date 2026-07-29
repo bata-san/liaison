@@ -1,0 +1,1 @@
+Re-run Windows installer verification after making PowerShell sources ASCII-safe and localizing progress in the UI.
