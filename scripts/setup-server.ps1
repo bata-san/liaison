@@ -45,8 +45,24 @@ function New-RandomToken {
 }
 
 function Get-WslDistributions {
-    $items = & wsl.exe --list --quiet 2>$null
-    return @($items | ForEach-Object { (([string]$_) -replace "\x00", "").Trim() } | Where-Object { $_ })
+    $registryRoot = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Lxss"
+    if (-not (Test-Path $registryRoot)) {
+        return @()
+    }
+
+    return @(
+        Get-ChildItem -Path $registryRoot -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try {
+                    $name = (Get-ItemProperty -Path $_.PSPath -Name DistributionName -ErrorAction Stop).DistributionName
+                    if ($name) { ([string]$name).Trim() }
+                } catch {
+                    # Ignore incomplete WSL registrations.
+                }
+            } |
+            Where-Object { $_ } |
+            Sort-Object -Unique
+    )
 }
 
 function Start-WslDocker([string]$Distribution) {
