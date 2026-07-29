@@ -8,7 +8,7 @@ on:
 jobs:
   windows-validation:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -19,6 +19,7 @@ jobs:
             "scripts/bootstrap-dependencies.ps1",
             "scripts/install-server-bundle.ps1",
             "scripts/install-client-bundle.ps1",
+            "scripts/install-xliaison.ps1",
             "scripts/setup-server.ps1",
             "scripts/setup-client.ps1",
             "scripts/start-client.ps1",
@@ -51,6 +52,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
 
       - name: Install frontend dependencies
         working-directory: apps/liaison-desktop
@@ -88,15 +93,17 @@ jobs:
       - name: Build release binaries
         run: cargo build --release -p liaison-service -p liaison-cli -p liaison-desktop
 
-      - name: Package server and client distributions
+      - name: Package Windows distributions
         shell: powershell
         run: .\scripts\build-distributions.ps1 -SkipBuild -SkipTests
 
       - name: Upload release distributions
         uses: actions/upload-artifact@v4
         with:
-          name: liaison-windows-release
+          name: xliaison-windows-release
           path: |
+            dist/xLiaison-Setup-Windows.exe
+            dist/xliaison-windows.zip
             dist/liaison-server-windows.zip
             dist/liaison-client-windows.zip
           if-no-files-found: error
