@@ -18,6 +18,14 @@ if (-not (Test-Path -LiteralPath $directUbuntuInstaller -PathType Leaf)) {
 }
 . $directUbuntuInstaller
 
+# This helper is loaded after the older WSL helpers so its virtualization preflight
+# and UTF-16-aware native output reader override their basic implementations.
+$virtualizationPreflight = Join-Path $PSScriptRoot "wsl-virtualization-preflight.ps1"
+if (-not (Test-Path -LiteralPath $virtualizationPreflight -PathType Leaf)) {
+    throw ("WSL virtualization preflight helper is missing: " + $virtualizationPreflight)
+}
+. $virtualizationPreflight
+
 $progressHelper = Join-Path $PSScriptRoot "setup-progress.ps1"
 if (Test-Path -LiteralPath $progressHelper -PathType Leaf) {
     . $progressHelper
