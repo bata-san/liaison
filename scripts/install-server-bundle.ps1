@@ -123,25 +123,8 @@ try {
     Add-LiaisonToolPaths | Out-Null
 
     if (-not $SkipDependencyInstall) {
-        if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-            Write-LiaisonDependencyStep "Installing Windows Subsystem for Linux"
-            & dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart | Out-Null
-            & dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart | Out-Null
-            throw "WSL was enabled. Restart Windows, then run Install Liaison Server.cmd again."
-        }
-
-        $distributions = Get-LiaisonWslDistributions
-        if ($distributions -notcontains $WslDistribution) {
-            Write-LiaisonDependencyStep "Installing the $WslDistribution WSL distribution"
-            & wsl.exe --install -d $WslDistribution --no-launch
-            if ($LASTEXITCODE -ne 0) {
-                throw "The WSL distribution could not be installed. Restart Windows and run setup again."
-            }
-            & wsl.exe -d $WslDistribution -u root -- sh -lc "true"
-            if ($LASTEXITCODE -ne 0) {
-                throw "The WSL distribution was installed but could not be initialized. Restart Windows and run setup again."
-            }
-        }
+        Ensure-LiaisonWslFeatures
+        Ensure-LiaisonWslDistribution -Distribution $WslDistribution
 
         Install-LiaisonDockerEngineInWsl -Distribution $WslDistribution
 
