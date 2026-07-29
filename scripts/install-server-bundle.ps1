@@ -124,7 +124,33 @@ try {
 
     if (-not $SkipDependencyInstall) {
         Ensure-LiaisonWslFeatures
-        Ensure-LiaisonWslDistribution -Distribution $WslDistribution
+
+        $installedDistributions = @(
+            Get-LiaisonWslDistributions |
+                Where-Object { $_ -and $_ -notlike "docker-desktop*" }
+        )
+        $selectedDistribution = $installedDistributions |
+            Where-Object { $_ -ieq $WslDistribution } |
+            Select-Object -First 1
+
+        if (-not $selectedDistribution -and $WslDistribution -like "Ubuntu*") {
+            $selectedDistribution = $installedDistributions |
+                Where-Object { $_ -like "Ubuntu*" } |
+                Sort-Object -Descending |
+                Select-Object -First 1
+        }
+
+        if ($selectedDistribution) {
+            if ($selectedDistribution -ine $WslDistribution) {
+                Write-Host "Using installed WSL distribution '$selectedDistribution' instead of '$WslDistribution'." -ForegroundColor Green
+                Write-EarlyLog "Using installed WSL distribution '$selectedDistribution' instead of '$WslDistribution'."
+            } else {
+                Write-Host "Using installed WSL distribution '$selectedDistribution'." -ForegroundColor Green
+            }
+            $WslDistribution = [string]$selectedDistribution
+        } else {
+            Ensure-LiaisonWslDistribution -Distribution $WslDistribution
+        }
 
         Install-LiaisonDockerEngineInWsl -Distribution $WslDistribution
 
