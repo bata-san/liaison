@@ -153,3 +153,8 @@ function Connect-LiaisonTailscaleInteractive {
     Write-Warning "Tailscale login is still pending. Liaison installation will continue."
     return $null
 }
+
+$wslFallbackPath = Join-Path $PSScriptRoot "wsl-install-fallback.ps1"
+if (Test-Path -LiteralPath $wslFallbackPath -PathType Leaf) {
+    . $wslFallbackPath
+}
