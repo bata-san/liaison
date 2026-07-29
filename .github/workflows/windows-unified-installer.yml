@@ -25,6 +25,9 @@ jobs:
       - name: Localize installer progress
         run: python .github/scripts/apply-installer-progress-localization.py
 
+      - name: Isolate fresh setup session logs
+        run: python .github/scripts/apply-installer-session-reset.py
+
       - name: Validate unified setup PowerShell
         shell: powershell
         run: |
