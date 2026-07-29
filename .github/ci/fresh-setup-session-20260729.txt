@@ -1,0 +1,1 @@
+Trigger Windows installer validation for fresh setup session log isolation.
