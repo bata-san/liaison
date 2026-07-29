@@ -44,6 +44,32 @@ replace_once(
 
 replace_once(
     "apps/liaison-installer/src-tauri/src/main.rs",
+    '''    let success = output.status.success();
+
+    let message = if success {
+        if role == "server" {
+            "サーバー設定が完了しました。LiaisonからこのPCを管理できます。"
+        } else {
+            "クライアント設定が完了しました。Liaisonでペアリングコードを入力してください。"
+        }
+        .to_owned()''',
+    '''    let success = output.status.success();
+    let tailscale_login_required = lower_log.contains("liaison_tailscale_login_required");
+
+    let message = if success {
+        if role == "client" && tailscale_login_required {
+            "クライアント設定は完了しました。Tailscaleのログインが残っています。ブラウザまたは通知領域のTailscaleからログインしてください。"
+        } else if role == "server" {
+            "サーバー設定が完了しました。LiaisonからこのPCを管理できます。"
+        } else {
+            "クライアント設定が完了しました。Liaisonでペアリングコードを入力してください。"
+        }
+        .to_owned()''',
+    "tailscale_login_required",
+)
+
+replace_once(
+    "apps/liaison-installer/src-tauri/src/main.rs",
     '''fn summarize_failure(log: &str) -> Option<String> {
     log.lines()
         .rev()
