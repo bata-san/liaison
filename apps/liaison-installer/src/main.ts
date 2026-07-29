@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import "./styles.css";
 
 type SetupRole = "server" | "client";
+type ToastKind = "error" | "info";
 
 interface SetupState {
   role: SetupRole | null;
@@ -14,6 +15,13 @@ interface SetupState {
 interface SetupResult extends SetupState {
   log: string;
   dashboard_path: string | null;
+}
+
+interface ToastState {
+  kind: ToastKind;
+  title: string;
+  message: string;
+  showLog: boolean;
 }
 
 const root = document.querySelector<HTMLDivElement>("#root")!;
@@ -29,6 +37,7 @@ let selectedRole: SetupRole = "server";
 let localOnly = false;
 let busy = false;
 let logText = "";
+let toast: ToastState | null = null;
 
 function escapeHtml(value: string): string {
   return value
@@ -45,17 +54,71 @@ function roleLabel(role: SetupRole | null): string {
   return "未設定";
 }
 
+function hasFailed(value: SetupState): boolean {
+  return value.role !== null
+    && value.updated_at_unix > 0
+    && !value.completed
+    && !value.restart_required;
+}
+
+function cleanErrorMessage(value: string): string {
+  return value
+    .replace(/^Setup failed:\s*/i, "")
+    .replace(/^Installation failed:\s*/i, "")
+    .trim();
+}
+
+function showErrorToast(message: string): void {
+  toast = {
+    kind: "error",
+    title: "セットアップに失敗しました",
+    message: cleanErrorMessage(message) || "処理を完了できませんでした。セットアップログを確認してください。",
+    showLog: true
+  };
+}
+
+function showRestartToast(message: string): void {
+  toast = {
+    kind: "info",
+    title: "Windowsの再起動が必要です",
+    message,
+    showLog: false
+  };
+}
+
 function render(): void {
   const completed = state.completed;
   const restart = state.restart_required;
+  const failed = !busy && hasFailed(state);
   const message = state.message || (completed ? "セットアップは完了しています。" : "このPCの役割を選択してください。");
+  const heading = completed
+    ? "セットアップ完了"
+    : restart
+      ? "再起動が必要です"
+      : failed
+        ? "セットアップに失敗しました"
+        : "このPCの役割を選択";
 
   root.innerHTML = `
+    ${toast ? `
+      <div class="toast-region" aria-live="assertive" aria-atomic="true">
+        <section class="setup-toast toast-${toast.kind}" role="${toast.kind === "error" ? "alert" : "status"}">
+          <div class="toast-icon" aria-hidden="true">${toast.kind === "error" ? "!" : "i"}</div>
+          <div class="toast-copy">
+            <strong>${escapeHtml(toast.title)}</strong>
+            <p>${escapeHtml(toast.message)}</p>
+            ${toast.showLog && logText ? `<button id="toast-log-button" class="toast-log-button" type="button">セットアップログを見る</button>` : ""}
+          </div>
+          <button id="toast-close-button" class="toast-close-button" type="button" aria-label="通知を閉じる">×</button>
+        </section>
+      </div>
+    ` : ""}
+
     <div class="setup-shell ${busy ? "is-busy" : ""}">
       <header class="setup-header">
         <div class="brand"><span>L</span><strong>Liaison</strong></div>
         <div class="header-copy">
-          <h1>${completed ? "セットアップ完了" : restart ? "再起動が必要です" : "このPCの役割を選択"}</h1>
+          <h1>${heading}</h1>
           <p>${escapeHtml(message)}</p>
         </div>
       </header>
@@ -126,7 +189,7 @@ function render(): void {
               <strong>${roleLabel(selectedRole)}</strong>
             </div>
             <button id="start-button" class="primary-button" type="button" ${busy ? "disabled" : ""}>
-              ${busy ? "セットアップ中…" : restart ? "再起動後に続行" : "セットアップを開始"}
+              ${busy ? "セットアップ中…" : restart ? "再起動後に続行" : failed ? "セットアップを再試行" : "セットアップを開始"}
             </button>
           </section>
         </main>
@@ -141,7 +204,7 @@ function render(): void {
       ` : ""}
 
       ${logText ? `
-        <details class="log-card" ${completed ? "" : "open"}>
+        <details id="setup-log-card" class="log-card" ${completed ? "" : "open"}>
           <summary>セットアップログ</summary>
           <pre id="setup-log"></pre>
         </details>
@@ -156,6 +219,17 @@ function render(): void {
 
   const log = document.querySelector<HTMLElement>("#setup-log");
   if (log) log.textContent = logText;
+
+  document.querySelector<HTMLButtonElement>("#toast-close-button")?.addEventListener("click", () => {
+    toast = null;
+    render();
+  });
+  document.querySelector<HTMLButtonElement>("#toast-log-button")?.addEventListener("click", () => {
+    const details = document.querySelector<HTMLDetailsElement>("#setup-log-card");
+    if (!details) return;
+    details.open = true;
+    details.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
 
   document.querySelectorAll<HTMLButtonElement>("[data-role]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -183,8 +257,19 @@ async function loadState(): Promise<void> {
   try {
     state = await invoke<SetupState>("get_setup_state");
     if (state.role) selectedRole = state.role;
+    if (hasFailed(state)) {
+      try {
+        logText = await invoke<string>("get_setup_log");
+      } catch {
+        logText = "";
+      }
+      showErrorToast(state.message);
+    } else if (state.restart_required) {
+      showRestartToast(state.message);
+    }
   } catch (reason) {
     state.message = `セットアップ状態を読み込めませんでした: ${String(reason)}`;
+    showErrorToast(state.message);
   }
   render();
 }
@@ -192,13 +277,15 @@ async function loadState(): Promise<void> {
 async function startSetup(): Promise<void> {
   if (busy) return;
   busy = true;
+  toast = null;
   logText = "";
   state = {
     ...state,
     role: selectedRole,
     completed: false,
     restart_required: false,
-    message: "セットアップを開始しています。"
+    message: "セットアップを開始しています。",
+    updated_at_unix: 0
   };
   render();
 
@@ -209,12 +296,18 @@ async function startSetup(): Promise<void> {
     });
     state = result;
     logText = result.log;
+    if (!result.completed && !result.restart_required) {
+      showErrorToast(result.message);
+    } else if (result.restart_required) {
+      showRestartToast(result.message);
+    }
   } catch (reason) {
+    const message = String(reason);
     state = {
       role: selectedRole,
       completed: false,
       restart_required: false,
-      message: String(reason),
+      message,
       updated_at_unix: Math.floor(Date.now() / 1000)
     };
     try {
@@ -222,6 +315,7 @@ async function startSetup(): Promise<void> {
     } catch {
       logText = "";
     }
+    showErrorToast(message);
   } finally {
     busy = false;
     render();
@@ -233,6 +327,7 @@ async function launchLiaison(): Promise<void> {
     await invoke("launch_liaison");
   } catch (reason) {
     state.message = `Liaisonを起動できませんでした: ${String(reason)}`;
+    showErrorToast(state.message);
     render();
   }
 }
@@ -248,9 +343,11 @@ async function resetSetup(): Promise<void> {
       updated_at_unix: 0
     };
     logText = "";
+    toast = null;
     render();
   } catch (reason) {
     state.message = String(reason);
+    showErrorToast(state.message);
     render();
   }
 }
