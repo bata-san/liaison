@@ -120,6 +120,39 @@ try {
     }
     . $bootstrapPath
 
+    # Override the bootstrap helper so native WSL failures are never reduced to a
+    # generic error. The last output lines are included in the launcher log.
+    function Invoke-LiaisonWslRoot {
+        param(
+            [Parameter(Mandatory = $true)][string]$Distribution,
+            [Parameter(Mandatory = $true)][string]$Script
+        )
+
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $rawOutput = & "$env:SystemRoot\System32\wsl.exe" -d $Distribution -u root -- sh -lc $Script 2>&1
+            $nativeExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        $cleanOutput = @(
+            $rawOutput |
+                ForEach-Object { (([string]$_) -replace "\x00", "").TrimEnd() } |
+                Where-Object { $_ }
+        )
+        foreach ($line in $cleanOutput) {
+            Write-Host $line
+        }
+
+        if ($nativeExitCode -ne 0) {
+            $tail = @($cleanOutput | Select-Object -Last 12)
+            $detail = if ($tail.Count -gt 0) { $tail -join " | " } else { "No output was returned by WSL." }
+            throw "A root command failed inside WSL distribution '$Distribution' with exit code $nativeExitCode. Last output: $detail"
+        }
+    }
+
     Add-LiaisonToolPaths | Out-Null
 
     if (-not $SkipDependencyInstall) {
@@ -152,7 +185,11 @@ try {
             Ensure-LiaisonWslDistribution -Distribution $WslDistribution
         }
 
-        Install-LiaisonDockerEngineInWsl -Distribution $WslDistribution
+        if (Test-LiaisonWslDocker -Distribution $WslDistribution) {
+            Write-Host "Using the existing Docker Engine in WSL distribution '$WslDistribution'." -ForegroundColor Green
+        } else {
+            Install-LiaisonDockerEngineInWsl -Distribution $WslDistribution
+        }
 
         if (-not $LocalOnly) {
             $tailscaleIp = Connect-LiaisonTailscale -InstallIfMissing
