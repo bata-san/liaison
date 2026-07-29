@@ -30,7 +30,7 @@
   "bundle": {
     "active": true,
     "targets": ["msi"],
-    "icon": [],
+    "icon": ["icons/icon.ico"],
     "resources": {
       "../../../target/release/liaison-service.exe": "payload/bin/liaison-service.exe",
       "../../../target/release/liaison-cli.exe": "payload/bin/liaison-cli.exe",
