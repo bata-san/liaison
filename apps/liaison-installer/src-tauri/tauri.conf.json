@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Liaison Setup",
+  "version": "0.2.0",
+  "identifier": "dev.batasan.liaison.setup",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1430",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Liaison Setup",
+        "width": 1100,
+        "height": 780,
+        "minWidth": 760,
+        "minHeight": 620,
+        "center": true,
+        "decorations": true,
+        "transparent": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi"],
+    "icon": [],
+    "resources": {
+      "../../../target/release/liaison-service.exe": "payload/bin/liaison-service.exe",
+      "../../../target/release/liaison-cli.exe": "payload/bin/liaison-cli.exe",
+      "../../../target/release/liaison-desktop.exe": "payload/bin/liaison-desktop.exe",
+      "../../../scripts/": "payload/scripts/",
+      "../../../config/": "payload/config/"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "wix": {
+        "language": "ja-JP"
+      }
+    }
+  }
+}
