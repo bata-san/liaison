@@ -120,8 +120,7 @@ try {
     }
     . $bootstrapPath
 
-    # Override the bootstrap helper so native WSL failures are never reduced to a
-    # generic error. The last output lines are included in the launcher log.
+    # Native WSL failures must include useful diagnostics rather than a generic error.
     function Invoke-LiaisonWslRoot {
         param(
             [Parameter(Mandatory = $true)][string]$Distribution,
@@ -131,7 +130,7 @@ try {
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = "Continue"
-            $rawOutput = & "$env:SystemRoot\System32\wsl.exe" -d $Distribution -u root -- sh -lc $Script 2>&1
+            $rawOutput = & "$env:SystemRoot\System32\wsl.exe" -d $Distribution -u root --exec sh -lc $Script 2>&1
             $nativeExitCode = $LASTEXITCODE
         } finally {
             $ErrorActionPreference = $previousErrorActionPreference
@@ -147,9 +146,87 @@ try {
         }
 
         if ($nativeExitCode -ne 0) {
-            $tail = @($cleanOutput | Select-Object -Last 12)
+            $tail = @($cleanOutput | Select-Object -Last 16)
             $detail = if ($tail.Count -gt 0) { $tail -join " | " } else { "No output was returned by WSL." }
             throw "A root command failed inside WSL distribution '$Distribution' with exit code $nativeExitCode. Last output: $detail"
+        }
+    }
+
+    # A missing Docker command is an expected pre-installation state, not an error.
+    function Test-LiaisonWslDocker {
+        param([Parameter(Mandatory = $true)][string]$Distribution)
+
+        $previousErrorActionPreference = $ErrorActionPreference
+        $nativeExitCode = 1
+        try {
+            $ErrorActionPreference = "Continue"
+            & "$env:SystemRoot\System32\wsl.exe" -d $Distribution -u root --exec sh -lc "command -v docker >/dev/null 2>&1 && command -v dockerd >/dev/null 2>&1 && docker info >/dev/null 2>&1" 2>$null | Out-Null
+            $nativeExitCode = $LASTEXITCODE
+        } catch {
+            $nativeExitCode = 1
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        return $nativeExitCode -eq 0
+    }
+
+    # Provision Docker without Docker Desktop. Ubuntu's own package is preferred because
+    # managed networks often block download.docker.com while allowing Ubuntu mirrors.
+    function Install-LiaisonDockerEngineInWsl {
+        param([Parameter(Mandatory = $true)][string]$Distribution)
+
+        Write-LiaisonDependencyStep "Installing Docker Engine inside WSL"
+        Invoke-LiaisonWslRoot -Distribution $Distribution -Script @'
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+
+if command -v docker >/dev/null 2>&1 && command -v dockerd >/dev/null 2>&1; then
+  exit 0
+fi
+
+if ! command -v apt-get >/dev/null 2>&1; then
+  echo "This WSL distribution does not provide apt-get. An Ubuntu or Debian distribution is required."
+  exit 41
+fi
+
+# Remove a possibly incomplete source left by an earlier installer attempt. The Ubuntu
+# archive package is attempted first and does not require Docker Desktop.
+rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources
+apt-get update -o Acquire::Retries=3
+
+if apt-get install -y ca-certificates curl docker.io; then
+  exit 0
+fi
+
+echo "Ubuntu's docker.io package failed; trying Docker's official repository."
+apt-get install -y ca-certificates curl gnupg
+install -m 0755 -d /etc/apt/keyrings
+curl --retry 3 --retry-delay 2 -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+. /etc/os-release
+cat > /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+apt-get update -o Acquire::Retries=3
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+'@
+
+        $defaultUser = (& "$env:SystemRoot\System32\wsl.exe" -d $Distribution --exec sh -lc 'id -un' 2>$null | Select-Object -First 1)
+        if ($defaultUser) {
+            $safeUser = ([string]$defaultUser).Trim() -replace "[^A-Za-z0-9._-]", ""
+            if ($safeUser -and $safeUser -ne "root") {
+                Invoke-LiaisonWslRoot -Distribution $Distribution -Script "usermod -aG docker '$safeUser' || true"
+            }
+        }
+
+        Start-LiaisonWslDocker -Distribution $Distribution
+        if (-not (Test-LiaisonWslDocker -Distribution $Distribution)) {
+            throw "Docker Engine was installed but did not become ready inside WSL distribution '$Distribution'. Check /var/log/liaison-dockerd.log."
         }
     }
 
