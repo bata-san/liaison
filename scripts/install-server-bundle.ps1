@@ -32,9 +32,8 @@ function Quote-LiaisonArgument([string]$Value) {
 function Test-LiaisonTranscriptNoise([string]$Line) {
     if (-not $Line) { return $true }
     return $Line -match '^\*+$' -or
-        $Line -match '^Windows PowerShell トランスクリプト' -or
-        $Line -match '^(開始時刻|終了時刻|ユーザー名|RunAs ユーザー|構成名|コンピューター|ホスト アプリケーション|プロセス ID):' -or
-        $Line -match '^(PSVersion|PSEdition|PSCompatibleVersions|BuildVersion|CLRVersion|WSManStackVersion|PSRemotingProtocolVersion|SerializationVersion):'
+        $Line -match '^Windows PowerShell ' -or
+        $Line -match '^(RunAs |PSVersion:|PSEdition:|PSCompatibleVersions:|BuildVersion:|CLRVersion:|WSManStackVersion:|PSRemotingProtocolVersion:|SerializationVersion:)'
 }
 
 function Publish-LiaisonLiveLine([string]$Source, [string]$Line) {
@@ -43,21 +42,21 @@ function Publish-LiaisonLiveLine([string]$Source, [string]$Line) {
     Write-LiaisonUnifiedLog ("DETAIL|" + $Source + "|" + $clean)
 
     if ($clean -match "Enabling Windows feature") {
-        Write-LiaisonProgress 20 "WSLを有効化中" "Windowsの仮想化機能を準備しています。完了後に再起動が必要な場合があります。"
+        Write-LiaisonProgress 20 "WSL feature enable" "Preparing Windows virtualization features. A restart may be required."
     } elseif ($clean -match "Installing the .* WSL distribution") {
-        Write-LiaisonProgress 26 "Ubuntuを準備中" "サーバー用Linux環境を準備しています。操作は不要です。"
+        Write-LiaisonProgress 26 "Ubuntu setup" "Preparing the Linux environment for the Liaison server."
     } elseif ($clean -match "Installing Docker Engine") {
-        Write-LiaisonProgress 44 "Dockerを導入中" "Workerを実行するためのDocker EngineをUbuntuへ導入しています。"
+        Write-LiaisonProgress 44 "Docker install" "Installing Docker Engine inside Ubuntu for worker execution."
     } elseif ($clean -match "apt-get update|Get:|Fetched") {
-        Write-LiaisonProgress 48 "必要なパッケージを取得中" "UbuntuからDockerの実行に必要な部品を取得しています。"
+        Write-LiaisonProgress 48 "Ubuntu packages" "Downloading packages required by Docker."
     } elseif ($clean -match "docker.io|docker-ce|dockerd") {
-        Write-LiaisonProgress 52 "Dockerを起動中" "Docker Engineの設定と起動確認を行っています。"
+        Write-LiaisonProgress 52 "Docker startup" "Configuring Docker Engine and checking that it starts."
     } elseif ($clean -match "Connecting the Tailscale") {
-        Write-LiaisonProgress 58 "Tailscaleを接続中" "別のPCから安全に接続できるようにしています。"
+        Write-LiaisonProgress 58 "Tailscale connection" "Preparing secure access from other computers."
     } elseif ($clean -match "Liaison Server setup completed|Server installation completed") {
-        Write-LiaisonProgress 78 "Liaisonサービスを登録中" "Windows起動後も自動で動作するように設定しています。"
+        Write-LiaisonProgress 78 "Liaison service" "Registering the Liaison service for automatic operation."
     } elseif ($clean -match "startup|Scheduled Task|repair") {
-        Write-LiaisonProgress 82 "自動起動を設定中" "Windowsへのサインイン後にLiaisonを自動起動する設定です。"
+        Write-LiaisonProgress 82 "Windows startup" "Configuring Liaison to start automatically with Windows."
     }
 }
 
@@ -79,7 +78,7 @@ if ($LocalOnly) { $parts += "-LocalOnly" }
 if ($SkipDependencyInstall) { $parts += "-SkipDependencyInstall" }
 $argumentLine = $parts -join " "
 
-Write-LiaisonProgress 16 "サーバー設定を開始" "WSL、Ubuntu、Docker、Tailscale、Liaisonサービスを順番に準備します。"
+Write-LiaisonProgress 16 "Server setup" "Preparing WSL, Ubuntu, Docker, Tailscale, and the Liaison service."
 $process = Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -PassThru -ArgumentList $argumentLine -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
 $installCount = 0
 $stdoutCount = 0
@@ -140,7 +139,7 @@ foreach ($source in $finalSources) {
 
 Write-LiaisonUnifiedLog ("Server core exit code: " + $processExitCode)
 if ($processExitCode -eq 0) {
-    Write-LiaisonProgress 86 "サーバーの準備完了" "WSL、Docker、Liaisonサービスの設定が完了しました。"
+    Write-LiaisonProgress 86 "Server ready" "WSL, Docker, and the Liaison service are ready."
 } else {
     Write-LiaisonUnifiedLog ("Installation failed: Server core exited with code " + $processExitCode + ".")
 }
