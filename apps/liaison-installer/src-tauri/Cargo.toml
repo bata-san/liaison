@@ -9,6 +9,7 @@ rust-version = "1.77"
 description = "Unified Liaison server and client setup"
 
 [build-dependencies]
+base64 = "0.22"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
