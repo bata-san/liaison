@@ -24,7 +24,9 @@ jobs:
         run: |
           $files = @(
             "scripts/bootstrap-dependencies.ps1",
+            "scripts/install-client-bundle.ps1",
             "scripts/install-server-bundle.ps1",
+            "scripts/setup-client.ps1",
             "scripts/setup-server.ps1",
             "scripts/repair-windows-server.ps1",
             "scripts/start-server-windows.ps1",
