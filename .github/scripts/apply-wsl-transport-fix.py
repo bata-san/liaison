@@ -70,6 +70,13 @@ replace_once(
 
 replace_once(
     "apps/liaison-installer/src-tauri/src/main.rs",
+    '        "WSLに必要なWindows機能を有効にしました。Windowsを再起動してから同じ役割で続行してください。".to_owned()',
+    '        "WSL 2に必要なWindows設定を修復しました。Windowsを再起動してから同じ役割で続行してください。".to_owned()',
+    "WSL 2に必要なWindows設定を修復しました",
+)
+
+replace_once(
+    "apps/liaison-installer/src-tauri/src/main.rs",
     '''fn summarize_failure(log: &str) -> Option<String> {
     log.lines()
         .rev()
@@ -86,14 +93,29 @@ replace_once(
     '''fn summarize_failure(log: &str) -> Option<String> {
     let lines: Vec<&str> = log.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
 
-    // Prefer the inner installer failure, which contains the actionable WSL/Docker
-    // diagnostic. The final wrapper line usually contains only a generic exit code.
+    // Prefer the inner actionable failure over wrapper lines that only repeat an
+    // exit code. This keeps BIOS, virtualization, WSL, and Docker diagnostics visible.
     for marker in ["Installation failed:", "セットアップに失敗", "エラー", "Setup failed:"] {
-        if let Some(line) = lines.iter().rev().find(|line| line.contains(marker)) {
+        if let Some(line) = lines.iter().rev().find(|line| {
+            line.contains(marker)
+                && !line.contains("Server core exited with code")
+                && !line.contains("Server setup failed with exit code")
+                && !line.contains("Elevated unified setup exited with code")
+        }) {
             return Some((*line).to_owned());
         }
     }
-    None
+
+    lines
+        .iter()
+        .rev()
+        .find(|line| {
+            line.contains("Installation failed:")
+                || line.contains("Setup failed:")
+                || line.contains("セットアップに失敗")
+                || line.contains("エラー")
+        })
+        .map(|line| (*line).to_owned())
 }''',
-    "Prefer the inner installer failure",
+    "Prefer the inner actionable failure over wrapper lines",
 )
