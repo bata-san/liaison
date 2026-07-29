@@ -98,7 +98,7 @@ function Invoke-LiaisonUbuntuDownload {
                     $received = [Math]::Round($job.BytesTransferred / 1MB, 1)
                     $total = [Math]::Round($job.BytesTotal / 1MB, 1)
                     $detail = $downloadPercent.ToString() + "% - " + $received.ToString() + " MB / " + $total.ToString() + " MB"
-                    Write-LiaisonProgress $overall "Ubuntuをダウンロード中" $detail
+                    Write-LiaisonProgress $overall "Ubuntu download" $detail
                 }
                 Start-Sleep -Seconds 2
             }
@@ -106,11 +106,11 @@ function Invoke-LiaisonUbuntuDownload {
             if ($job) { Remove-BitsTransfer -BitsJob $job -ErrorAction SilentlyContinue }
             Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
             Write-LiaisonUnifiedLog ("WARNING|BITS download failed: " + $_.Exception.Message)
-            Write-LiaisonProgress 28 "Ubuntuをダウンロード中" "別のHTTPS方式へ切り替えています。操作は不要です。"
+            Write-LiaisonProgress 28 "Ubuntu download" "Switching to the standard HTTPS download method. No action is required."
             Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $partial -ErrorAction Stop
         }
     } else {
-        Write-LiaisonProgress 28 "Ubuntuをダウンロード中" "公式イメージをHTTPSで取得しています。操作は不要です。"
+        Write-LiaisonProgress 28 "Ubuntu download" "Downloading the official image over HTTPS. No action is required."
         Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $partial -ErrorAction Stop
     }
     Move-Item -LiteralPath $partial -Destination $Destination -Force
@@ -133,7 +133,7 @@ function Get-LiaisonExpectedChecksum {
 
     $bytes = [IO.File]::ReadAllBytes($checksumPath)
     if ($bytes.Length -eq 0) {
-        throw "Ubuntuのチェックサム一覧が空でした。ネットワークまたはプロキシ設定を確認してください。"
+        throw "The Ubuntu checksum list was empty. Check the network or proxy configuration."
     }
 
     $checksumText = [Text.Encoding]::UTF8.GetString($bytes) -replace "\x00", ""
@@ -142,7 +142,7 @@ function Get-LiaisonExpectedChecksum {
     if (-not $match.Success) {
         $preview = (($checksumText -split "`r?`n") | Select-Object -First 4) -join " | "
         Write-LiaisonUnifiedLog ("Checksum list preview: " + $preview)
-        throw ("Ubuntuの公式チェックサム一覧を解析できませんでした。対象: " + $FileName)
+        throw ("The official Ubuntu checksum list could not be parsed for " + $FileName + ".")
     }
 
     return $match.Groups[1].Value.ToLowerInvariant()
@@ -152,7 +152,7 @@ function Ensure-LiaisonWslDistribution {
     param([Parameter(Mandatory = $true)][string]$Distribution)
     if ((Get-LiaisonWslDistributions) -contains $Distribution) {
         Write-LiaisonUnifiedLog ("WSL distribution already installed: " + $Distribution)
-        Write-LiaisonProgress 43 "Ubuntuは準備済み" "既存のUbuntuを使用します。"
+        Write-LiaisonProgress 43 "Ubuntu ready" "Using the existing Ubuntu installation."
         return
     }
 
@@ -163,8 +163,8 @@ function Ensure-LiaisonWslDistribution {
     $downloadFolder = Join-Path $env:ProgramData "Liaison\downloads"
     $archivePath = Join-Path $downloadFolder $fileName
 
-    Write-LiaisonProgress 26 "Ubuntuを準備中" "Microsoft Storeを使わず、Ubuntu 24.04 LTSの公式イメージを使用します。"
-    Write-LiaisonProgress 27 "安全性を確認中" "公式SHA-256チェックサムを取得しています。操作は不要です。"
+    Write-LiaisonProgress 26 "Ubuntu image" "Using the official Ubuntu 24.04 LTS image without Microsoft Store."
+    Write-LiaisonProgress 27 "Ubuntu checksum" "Downloading the official SHA-256 checksum. No action is required."
     $expected = Get-LiaisonExpectedChecksum -ChecksumUri $checksumUri -FileName $fileName -DownloadFolder $downloadFolder
     Write-LiaisonUnifiedLog ("Expected Ubuntu SHA-256: " + $expected)
 
@@ -180,11 +180,11 @@ function Ensure-LiaisonWslDistribution {
         if ($needDownload) {
             Invoke-LiaisonUbuntuDownload -Uri $archiveUri -Destination $archivePath
         } else {
-            Write-LiaisonProgress 38 "Ubuntuを確認中" "保存済みの公式イメージを検証しています。"
+            Write-LiaisonProgress 38 "Ubuntu cache check" "Verifying the saved Ubuntu image."
             Write-LiaisonUnifiedLog ("Using cached Ubuntu image: " + $archivePath)
         }
 
-        Write-LiaisonProgress 39 "Ubuntuを検証中" "ダウンロード内容が公式ハッシュと一致するか確認しています。"
+        Write-LiaisonProgress 39 "Ubuntu verification" "Checking that the image matches the official SHA-256 checksum."
         $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
         Write-LiaisonUnifiedLog ("Actual Ubuntu SHA-256: " + $actual)
         if ($actual -eq $expected) {
@@ -195,12 +195,12 @@ function Ensure-LiaisonWslDistribution {
         Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
         if ($attempt -lt 2) {
             Write-LiaisonUnifiedLog "WARNING|Ubuntu image checksum mismatch. Downloading a clean copy."
-            Write-LiaisonProgress 28 "Ubuntuを再取得中" "保存済みファイルが不完全だったため、自動で取得し直しています。"
+            Write-LiaisonProgress 28 "Ubuntu redownload" "The saved file was incomplete. Downloading a clean copy automatically."
         }
     }
 
     if (-not $verified) {
-        throw "Ubuntu公式イメージのSHA-256検証に2回失敗しました。プロキシやセキュリティソフトがダウンロードを変更していないか確認してください。"
+        throw "The official Ubuntu image failed SHA-256 verification twice. Check whether a proxy or security product modifies downloads."
     }
     Write-LiaisonUnifiedLog ("Ubuntu SHA-256 verified: " + $actual)
 
@@ -210,16 +210,16 @@ function Ensure-LiaisonWslDistribution {
     }
     New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
 
-    Write-LiaisonProgress 40 "Ubuntuを登録中" "検証済みイメージをWSL 2へ登録しています。操作は不要です。"
+    Write-LiaisonProgress 40 "Ubuntu import" "Registering the verified image as a WSL 2 distribution. No action is required."
     $importResult = Invoke-LiaisonWslCommand -Arguments @("--import", $Distribution, $installLocation, $archivePath, "--version", "2")
     if ($importResult.ExitCode -ne 0) {
         throw ("Ubuntu import failed with exit code " + $importResult.ExitCode + ". " + (Get-LiaisonWslDetail $importResult))
     }
 
-    Write-LiaisonProgress 42 "Ubuntuを初期化中" "Ubuntuを初めて起動して動作を確認しています。"
+    Write-LiaisonProgress 42 "Ubuntu initialization" "Starting Ubuntu for the first time and checking its status."
     $initResult = Invoke-LiaisonWslCommand -Arguments @("-d", $Distribution, "-u", "root", "--exec", "sh", "-lc", "true")
     if ($initResult.ExitCode -ne 0) {
         throw ("Ubuntu was imported but could not start. Windows may need a restart. " + (Get-LiaisonWslDetail $initResult))
     }
-    Write-LiaisonProgress 43 "Ubuntuの準備完了" "Ubuntu WSLが正常に起動しました。"
+    Write-LiaisonProgress 43 "Ubuntu ready" "Ubuntu WSL started successfully."
 }
