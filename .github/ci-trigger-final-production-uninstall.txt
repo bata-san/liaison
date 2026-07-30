@@ -1,0 +1,1 @@
+Validate final production desktop and optional NSIS cleanup installer.
