@@ -1,0 +1,1 @@
+Validate production-only Tauri config and optional NSIS full cleanup.
