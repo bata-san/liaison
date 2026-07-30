@@ -1,0 +1,1 @@
+Retry final production desktop and NSIS cleanup validation.
