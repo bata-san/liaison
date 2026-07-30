@@ -16,6 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Apply WSL direct argv execution fix
+        shell: powershell
+        run: .\scripts\apply-wsl-exec-argv-fix.ps1
+
       - name: Apply WSL transport compatibility fix
         run: python .github/scripts/apply-wsl-transport-fix.py
 
@@ -38,6 +42,7 @@ jobs:
         shell: powershell
         run: |
           $files = @(
+            "scripts/apply-wsl-exec-argv-fix.ps1",
             "scripts/bootstrap-dependencies.ps1",
             "scripts/bootstrap-dependencies-core.ps1",
             "scripts/install-ownership.ps1",
@@ -88,6 +93,9 @@ jobs:
       - name: Validate dashboard frontend
         working-directory: apps/liaison-desktop
         run: npm run build
+
+      - name: Test WSL runtime adapter
+        run: cargo test -p liaison-runtime
 
       - name: Build server and CLI payload binaries
         run: cargo build --release -p liaison-service -p liaison-cli
