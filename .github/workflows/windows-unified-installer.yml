@@ -31,12 +31,16 @@ jobs:
       - name: Protect pairing token output
         run: python .github/scripts/apply-pairing-token-safety.py
 
+      - name: Track uninstall dependency ownership
+        run: python .github/scripts/apply-uninstall-ownership.py
+
       - name: Validate unified setup PowerShell
         shell: powershell
         run: |
           $files = @(
             "scripts/bootstrap-dependencies.ps1",
             "scripts/bootstrap-dependencies-core.ps1",
+            "scripts/install-ownership.ps1",
             "scripts/setup-progress.ps1",
             "scripts/wsl-install-direct.ps1",
             "scripts/wsl-install-resilience.ps1",
@@ -48,7 +52,8 @@ jobs:
             "scripts/setup-server.ps1",
             "scripts/repair-windows-server.ps1",
             "scripts/start-server-windows.ps1",
-            "scripts/install-unified-role.ps1"
+            "scripts/install-unified-role.ps1",
+            "scripts/uninstall-liaison.ps1"
           )
           $messages = @()
           foreach ($file in $files) {
@@ -102,9 +107,9 @@ jobs:
         working-directory: apps/liaison-installer
         run: npm run build
 
-      - name: Build unified MSI
+      - name: Build unified Windows installers
         working-directory: apps/liaison-installer
-        run: npm run tauri:build -- --bundles msi
+        run: npm run tauri:build -- --bundles msi,nsis
 
       - name: Prepare installer artifact
         shell: powershell
@@ -112,12 +117,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $msi = Get-ChildItem "apps/liaison-installer/src-tauri/target/release/bundle/msi/*.msi" |
             Select-Object -First 1
+          $setupExe = Get-ChildItem "apps/liaison-installer/src-tauri/target/release/bundle/nsis/*-setup.exe" |
+            Select-Object -First 1
           if (-not $msi) {
             throw "The unified Liaison MSI was not generated."
           }
+          if (-not $setupExe) {
+            throw "The unified Liaison NSIS setup executable was not generated."
+          }
           Copy-Item $msi.FullName "dist/Liaison-Setup-x64.msi" -Force
+          Copy-Item $setupExe.FullName "dist/Liaison-Setup-x64.exe" -Force
           (Get-FileHash "dist/Liaison-Setup-x64.msi" -Algorithm SHA256).Hash |
-            Set-Content "dist/Liaison-Setup-x64.sha256.txt" -Encoding ASCII
+            Set-Content "dist/Liaison-Setup-x64.msi.sha256.txt" -Encoding ASCII
+          (Get-FileHash "dist/Liaison-Setup-x64.exe" -Algorithm SHA256).Hash |
+            Set-Content "dist/Liaison-Setup-x64.exe.sha256.txt" -Encoding ASCII
 
       - name: Upload unified installer
         uses: actions/upload-artifact@v4
@@ -125,5 +138,7 @@ jobs:
           name: liaison-unified-windows-installer
           path: |
             dist/Liaison-Setup-x64.msi
-            dist/Liaison-Setup-x64.sha256.txt
+            dist/Liaison-Setup-x64.exe
+            dist/Liaison-Setup-x64.msi.sha256.txt
+            dist/Liaison-Setup-x64.exe.sha256.txt
           if-no-files-found: error
