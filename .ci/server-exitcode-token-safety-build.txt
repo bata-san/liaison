@@ -1,0 +1,1 @@
+Validate native ERRORLEVEL recording, token rotation, pairing log redaction, PowerShell 5.1 syntax, and unified MSI packaging.
