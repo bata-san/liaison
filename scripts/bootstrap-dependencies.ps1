@@ -1,3 +1,9 @@
+$ownershipHelper = Join-Path $PSScriptRoot "install-ownership.ps1"
+if (-not (Test-Path -LiteralPath $ownershipHelper -PathType Leaf)) {
+    throw ("Dependency ownership helper is missing: " + $ownershipHelper)
+}
+. $ownershipHelper
+
 $coreBootstrap = Join-Path $PSScriptRoot "bootstrap-dependencies-core.ps1"
 if (-not (Test-Path -LiteralPath $coreBootstrap -PathType Leaf)) {
     throw ("Core dependency bootstrap is missing: " + $coreBootstrap)
