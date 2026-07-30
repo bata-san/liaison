@@ -62,8 +62,8 @@ function Publish-LiaisonLiveLine([string]$Source, [string]$Line) {
         }
     }
 
-    # The redirected stdout/stderr files remain available for diagnostics. The unified
-    # UI log intentionally omits package-manager chatter and duplicate lines.
+    # The redirected stdout/stderr files remain available while setup is running. The
+    # unified UI log intentionally omits package-manager chatter and duplicate lines.
     if ((Test-LiaisonPackageNoise $clean) -and $clean -notmatch '(^E:|error|failed|warning)') { return }
     if (-not $script:PublishedLiaisonLines.Add($clean)) { return }
 
@@ -179,7 +179,7 @@ if ($processExitCode -eq -1) {
     }
 }
 
-Remove-Item -LiteralPath $commandFile, $resultLog -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $commandFile, $resultLog, $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 Write-LiaisonUnifiedLog ("Server core exit code: " + $processExitCode)
 if ($processExitCode -eq 0) {
     Write-LiaisonProgress 86 "Server ready" "WSL, Docker, and the Liaison service are ready."
