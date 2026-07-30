@@ -28,6 +28,9 @@ jobs:
       - name: Isolate fresh setup session logs
         run: python .github/scripts/apply-installer-session-reset.py
 
+      - name: Protect pairing token output
+        run: python .github/scripts/apply-pairing-token-safety.py
+
       - name: Validate unified setup PowerShell
         shell: powershell
         run: |
