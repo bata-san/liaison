@@ -33,7 +33,6 @@ function Test-LiaisonTranscriptNoise([string]$Line) {
     if (-not $Line) { return $true }
     return $Line -match '^\*+$' -or
         $Line -match '^Windows PowerShell ' -or
-        $Line -match '^(開始時刻:|終了時刻:|ユーザー名:|RunAs ユーザー:|構成名:|コンピューター:|ホスト アプリケーション:|プロセス ID:)' -or
         $Line -match '^(RunAs |PSVersion:|PSEdition:|PSCompatibleVersions:|BuildVersion:|CLRVersion:|WSManStackVersion:|PSRemotingProtocolVersion:|SerializationVersion:)'
 }
 
