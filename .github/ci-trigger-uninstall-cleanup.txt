@@ -1,0 +1,1 @@
+Validate Tauri production desktop payload and optional full NSIS cleanup flow.
