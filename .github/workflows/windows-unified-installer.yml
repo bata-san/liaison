@@ -80,12 +80,19 @@ jobs:
         working-directory: apps/liaison-desktop
         run: npm install
 
-      - name: Build dashboard frontend
+      - name: Validate dashboard frontend
         working-directory: apps/liaison-desktop
         run: npm run build
 
-      - name: Build Liaison payload binaries
-        run: cargo build --release -p liaison-service -p liaison-cli -p liaison-desktop
+      - name: Build server and CLI payload binaries
+        run: cargo build --release -p liaison-service -p liaison-cli
+
+      - name: Build Liaison desktop production executable
+        working-directory: apps/liaison-desktop
+        run: npm run tauri:build -- --no-bundle
+
+      - name: Verify Liaison desktop production executable
+        run: python .github/scripts/check-desktop-production-binary.py
 
       - name: Install setup frontend dependencies
         working-directory: apps/liaison-installer
