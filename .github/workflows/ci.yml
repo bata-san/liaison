@@ -12,10 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Apply WSL direct argv execution fix
+        shell: powershell
+        run: .\scripts\apply-wsl-exec-argv-fix.ps1
+
       - name: Validate PowerShell setup scripts
         shell: powershell
         run: |
           $files = @(
+            "scripts/apply-wsl-exec-argv-fix.ps1",
             "scripts/bootstrap-dependencies.ps1",
             "scripts/install-server-bundle.ps1",
             "scripts/install-client-bundle.ps1",
