@@ -1,0 +1,1 @@
+Validate the ASCII-only server core cmd wrapper, recorded ERRORLEVEL result file, reduced duplicate logs, PowerShell 5.1 syntax, and MSI packaging.
