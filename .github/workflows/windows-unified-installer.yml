@@ -94,7 +94,7 @@ jobs:
 
       - name: Build Liaison desktop production executable
         working-directory: apps/liaison-desktop
-        run: npm run tauri:build -- --no-bundle
+        run: npm run tauri:build -- --no-bundle --config src-tauri/tauri.production.conf.json
 
       - name: Verify Liaison desktop production executable
         run: python .github/scripts/check-desktop-production-binary.py
